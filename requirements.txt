@@ -1,0 +1,18 @@
+# Growout + Pregrow Management System — Python dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Python 3.11+ required.
+
+streamlit>=1.35.0
+pandas>=2.0.0
+reportlab>=4.0.0
+
+# Authentication
+streamlit-authenticator>=0.4.2
+PyYAML>=6.0
+bcrypt>=4.0.0
+
+# Database (optional — only needed when APP_STORAGE_BACKEND=supabase)
+supabase>=2.0.0
