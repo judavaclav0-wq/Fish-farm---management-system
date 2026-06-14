@@ -16,3 +16,4 @@ bcrypt>=4.0.0
 
 # Database (optional — only needed when APP_STORAGE_BACKEND=supabase)
 supabase>=2.0.0
+python-dotenv>=1.0.0
