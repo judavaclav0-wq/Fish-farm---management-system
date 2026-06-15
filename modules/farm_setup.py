@@ -341,27 +341,6 @@ def _render_tank_editor(farm: dict, sys: dict, tank: dict, batches: list) -> Non
                 new_batch_id   = None
                 new_batch_name = "Mixed"
 
-        st.markdown("**O₂ thresholds**")
-        o2a, o2b = st.columns(2)
-
-        new_o2_min = o2a.number_input(
-            "O₂ min (mg/L)",
-            min_value=0.0,
-            value=safe_float(tank.get("o2_min"), 6.0),
-            step=0.1,
-            format="%.1f",
-            key=f"{tid}_o2min",
-        )
-
-        new_o2_max = o2b.number_input(
-            "O₂ max (mg/L)",
-            min_value=0.0,
-            value=safe_float(tank.get("o2_max"), 12.0),
-            step=0.1,
-            format="%.1f",
-            key=f"{tid}_o2max",
-        )
-
         btn_save, btn_del = st.columns([3, 1])
 
         if btn_save.button(
@@ -428,9 +407,6 @@ def _render_tank_editor(farm: dict, sys: dict, tank: dict, batches: list) -> Non
                         "tank_volume_m3": float(new_volume),
 
                         "max_mortality_percent_day": float(new_max_mort),
-
-                        "o2_min": float(new_o2_min),
-                        "o2_max": float(new_o2_max),
 
                         "batch_id":   new_batch_id,
                         "batch_name": new_batch_name,
@@ -508,24 +484,6 @@ def _render_add_tank(farm: dict, sys: dict, batches: list) -> None:
             format="%.2f",
         )
 
-        st.markdown("**O₂ thresholds**")
-        row4a, row4b = st.columns(2)
-
-        t_o2_min = row4a.number_input(
-            "O₂ min (mg/L)",
-            min_value=0.0,
-            value=6.0,
-            step=0.1,
-            format="%.1f",
-        )
-        t_o2_max = row4b.number_input(
-            "O₂ max (mg/L)",
-            min_value=0.0,
-            value=12.0,
-            step=0.1,
-            format="%.1f",
-        )
-
         st.markdown("**Batch composition**")
         if active_batches:
             batch_labels = ["— None —"] + [
@@ -590,9 +548,6 @@ def _render_add_tank(farm: dict, sys: dict, batches: list) -> None:
                     "tank_volume_m3": float(t_volume),
 
                     "max_mortality_percent_day": float(t_max_mort),
-
-                    "o2_min": float(t_o2_min),
-                    "o2_max": float(t_o2_max),
 
                     "batch_id":   _t_batch_id,
                     "batch_name": _t_batch_name,
@@ -721,14 +676,12 @@ def _migrate_farm(farm: dict) -> dict:
                 changed = True
 
             defaults = {
-                "avg_weight_g":             100.0,
-                "feed_kg_day":              0.0,
-                "tank_volume_m3":           10.0,
+                "avg_weight_g":              100.0,
+                "feed_kg_day":               0.0,
+                "tank_volume_m3":            10.0,
                 "max_mortality_percent_day": 0.5,
-                "o2_min":                   6.0,
-                "o2_max":                   12.0,
-                "batch_id":                 None,
-                "batch_name":               "",
+                "batch_id":                  None,
+                "batch_name":                "",
                 "initial_batch_composition": [],
                 # grading_status / grading_notes: intentionally not defaulted here.
                 # Old records that already carry these fields are left untouched.

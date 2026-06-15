@@ -490,8 +490,6 @@ def compute_tank_state(
     grading_notes  = tank.get("grading_notes", "")
 
     max_mortality_pct = safe_float(tank.get("max_mortality_percent_day"), 0.0)
-    o2_min            = safe_float(tank.get("o2_min"), 0.0)
-    o2_max            = safe_float(tank.get("o2_max"), 0.0)
 
     # ── Daily logs ────────────────────────────────────────────────────────
     tank_logs = [
@@ -573,14 +571,6 @@ def compute_tank_state(
             f"Daily mortality above limit: {daily_mortality_pct:.2f}% "
             f"(limit {max_mortality_pct:.2f}%)"
         )
-    if last_log:
-        oxygen = safe_float(last_log.get("oxygen"), None)
-        if oxygen is not None:
-            if o2_min > 0 and oxygen < o2_min:
-                warnings.append(f"O2 below tank minimum: {oxygen} mg/L")
-            if o2_max > 0 and oxygen > o2_max:
-                warnings.append(f"O2 above tank maximum: {oxygen} mg/L")
-
     # ── Batch composition (NEW) ───────────────────────────────────────────
     # If pre-computed compositions are available, use them for a rich list.
     # Otherwise fall back to the legacy single-batch from tank.batch_id.
@@ -713,9 +703,6 @@ def compute_tank_state(
 
         "max_mortality_percent_day": max_mortality_pct,
         "total_feed_kg":            round(total_feed_logged, 2),
-
-        "o2_min": o2_min,
-        "o2_max": o2_max,
 
         "grading_date":          grading_date,
         "grading_sample_count":  grading_sample_count,
