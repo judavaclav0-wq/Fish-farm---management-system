@@ -63,19 +63,23 @@ def _next_planned_vaccination(batch: dict) -> dict | None:
 
 def _vacc_status(batch: dict, today: date) -> str:
     """
-    Vaccination status string.
-    Uses vaccination_schedule if present; falls back to legacy fields.
+    Vaccination status string, or "" when no date has been set.
+    Uses vaccination_schedule if the key is present; falls back to legacy fields only
+    when the key is absent entirely (truly old records).
     """
-    schedule = batch.get("vaccination_schedule", [])
-    if schedule:
+    if "vaccination_schedule" in batch:
+        schedule = batch["vaccination_schedule"]
+        if not schedule:
+            # Key exists but list is empty — no vaccination date provided.
+            return ""
         next_v = _next_planned_vaccination(batch)
         if next_v is None:
             done_any = any(v.get("done") for v in schedule)
-            return "✅ Done — no next date" if done_any else "No vaccination planned"
+            return "✅ Done — no next date" if done_any else ""
         try:
             next_date = date.fromisoformat(next_v["date"])
         except (ValueError, TypeError, KeyError):
-            return "— invalid date"
+            return ""
         delta = (next_date - today).days
         if delta < 0:
             return f"🔴 Overdue ({abs(delta)}d)"
@@ -84,14 +88,16 @@ def _vacc_status(batch: dict, today: date) -> str:
         if delta <= 7:
             return f"🟠 Upcoming ({delta}d)"
         return f"🟢 Upcoming ({delta}d)"
-    # ── Legacy fallback ──────────────────────────────────────────────────────
+    # ── Legacy fallback (key absent = pre-schedule batch) ───────────────────
     if batch.get("vaccination_done", False):
         return "✅ Done"
     dah = _days_after_hatch(batch.get("hatch_date", ""), today)
     if dah is None:
-        return "—"
-    due_day    = int(batch.get("vaccination_due_day") or 60)
-    days_until = due_day - dah
+        return ""
+    due_day_raw = batch.get("vaccination_due_day")
+    if not due_day_raw:
+        return ""
+    days_until = int(due_day_raw) - dah
     if days_until <= 0:
         return "🔴 Due now!"
     if days_until <= 7:
@@ -101,8 +107,10 @@ def _vacc_status(batch: dict, today: date) -> str:
 
 def _vacc_is_urgent(batch: dict, today: date) -> bool:
     """True when next vaccination is overdue or due within 7 days."""
-    schedule = batch.get("vaccination_schedule", [])
-    if schedule:
+    if "vaccination_schedule" in batch:
+        schedule = batch["vaccination_schedule"]
+        if not schedule:
+            return False
         next_v = _next_planned_vaccination(batch)
         if next_v is None:
             return False
@@ -110,14 +118,16 @@ def _vacc_is_urgent(batch: dict, today: date) -> bool:
             return (date.fromisoformat(next_v["date"]) - today).days <= 7
         except (ValueError, TypeError, KeyError):
             return False
-    # Legacy fallback
+    # Legacy fallback (key absent = pre-schedule batch)
     if batch.get("vaccination_done", False):
         return False
     dah = _days_after_hatch(batch.get("hatch_date", ""), today)
     if dah is None:
         return False
-    due_day = int(batch.get("vaccination_due_day") or 60)
-    return (due_day - dah) <= 7
+    due_day_raw = batch.get("vaccination_due_day")
+    if not due_day_raw:
+        return False
+    return (int(due_day_raw) - dah) <= 7
 
 
 def _parse_date_safe(date_str: str) -> date | None:
@@ -164,10 +174,11 @@ def _render_batch_card_readonly(batch: dict, sm: dict, today: date) -> None:
         )
 
         # Vaccination status (display only)
-        if is_urgent:
-            c3.warning(vacc_status)
-        else:
-            c3.caption(f"Vaccination: {vacc_status}")
+        if vacc_status:
+            if is_urgent:
+                c3.warning(vacc_status)
+            else:
+                c3.caption(f"Vaccination: {vacc_status}")
         if next_v:
             c3.caption(f"📅 Next: {next_v['date']}")
 
@@ -378,10 +389,11 @@ def render() -> None:
                         f"({sm.get('mortality_pct', 0.0):.1f}%)"
                     )
 
-                    if is_urgent:
-                        c3.warning(vacc_status)
-                    else:
-                        c3.caption(f"Vaccination: {vacc_status}")
+                    if vacc_status:
+                        if is_urgent:
+                            c3.warning(vacc_status)
+                        else:
+                            c3.caption(f"Vaccination: {vacc_status}")
                     if next_v:
                         c3.caption(f"📅 Next: {next_v['date']}")
 
