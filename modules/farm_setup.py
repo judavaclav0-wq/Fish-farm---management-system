@@ -264,6 +264,24 @@ def _render_tank_editor(farm: dict, sys: dict, tank: dict, batches: list) -> Non
         mc1.metric("Biomass (kg)", f"{calc_biomass:.1f}")
         mc2.metric("Density (kg/m³)", f"{calc_density:.2f}")
 
+        st.markdown("**Layout position**")
+        st.caption("Column (X) and row (Y) on the farm map. Set 0 to auto-arrange.")
+        lc1, lc2 = st.columns(2)
+        new_layout_x = lc1.number_input(
+            "Column (X)",
+            min_value=0,
+            value=int(tank.get("layout_x") or 0),
+            step=1,
+            key=f"{tid}_layout_x",
+        )
+        new_layout_y = lc2.number_input(
+            "Row (Y)",
+            min_value=0,
+            value=int(tank.get("layout_y") or 0),
+            step=1,
+            key=f"{tid}_layout_y",
+        )
+
         st.markdown("**Batch composition**")
         active_batches = [b for b in batches if b.get("status") == "active"]
 
@@ -408,6 +426,9 @@ def _render_tank_editor(farm: dict, sys: dict, tank: dict, batches: list) -> Non
 
                         "max_mortality_percent_day": float(new_max_mort),
 
+                        "layout_x": int(new_layout_x),
+                        "layout_y": int(new_layout_y),
+
                         "batch_id":   new_batch_id,
                         "batch_name": new_batch_name,
 
@@ -484,6 +505,12 @@ def _render_add_tank(farm: dict, sys: dict, batches: list) -> None:
             format="%.2f",
         )
 
+        st.markdown("**Layout position** (optional)")
+        st.caption("Column and row on the farm map. Leave at 0 to auto-arrange.")
+        la1, la2 = st.columns(2)
+        t_layout_x = la1.number_input("Column (X)", min_value=0, value=0, step=1)
+        t_layout_y = la2.number_input("Row (Y)", min_value=0, value=0, step=1)
+
         st.markdown("**Batch composition**")
         if active_batches:
             batch_labels = ["— None —"] + [
@@ -548,6 +575,9 @@ def _render_add_tank(farm: dict, sys: dict, batches: list) -> None:
                     "tank_volume_m3": float(t_volume),
 
                     "max_mortality_percent_day": float(t_max_mort),
+
+                    "layout_x": int(t_layout_x),
+                    "layout_y": int(t_layout_y),
 
                     "batch_id":   _t_batch_id,
                     "batch_name": _t_batch_name,
@@ -680,6 +710,8 @@ def _migrate_farm(farm: dict) -> dict:
                 "feed_kg_day":               0.0,
                 "tank_volume_m3":            10.0,
                 "max_mortality_percent_day": 0.5,
+                "layout_x":                  0,
+                "layout_y":                  0,
                 "batch_id":                  None,
                 "batch_name":                "",
                 "initial_batch_composition": [],

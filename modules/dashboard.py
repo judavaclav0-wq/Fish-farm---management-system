@@ -91,20 +91,9 @@ def _composition_label(comp: list[dict], fallback: str = "") -> str:
     return " | ".join(parts)
 
 
-def _render_tank_visual_overview(filtered_states: list[dict]) -> None:
-    """Render a circular card grid for every tank in filtered_states.
-
-    All styles are inline so the HTML is built as a single unbroken line.
-    Multi-line indented HTML causes Markdown to treat indented lines as code
-    blocks and display raw tags — inline styles on one line avoids that entirely.
-    """
-
-    st.subheader("Tank visual overview")
-
-    # ── Shared style strings ───────────────────────────────────────────────────
-    S_GRID   = ("display:grid;grid-template-columns:repeat(auto-fit,minmax(162px,1fr));"
-                "gap:20px;padding:6px 0 20px 0;")
-    S_ITEM   = "display:flex;justify-content:center;"
+def _circle_html(s: dict) -> str:
+    """Return the HTML for a single circular tank card (no wrapper div)."""
+    CIRCLE_D = 158
     S_NAME   = ("display:block;font-size:0.78rem;font-weight:700;color:#e2e8f0;"
                 "line-height:1.25;margin-bottom:4px;max-width:132px;"
                 "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;")
@@ -113,58 +102,215 @@ def _render_tank_visual_overview(filtered_states: list[dict]) -> None:
     S_BATCH  = ("display:block;font-size:0.66rem;color:#64748b;margin-top:3px;"
                 "max-width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;")
 
-    cards_html = ""
+    tank_name  = _html.escape(str(s.get("tank_name") or "—"))
+    biomass    = float(s.get("biomass_kg",    0) or 0)
+    density    = float(s.get("density_kg_m3", 0) or 0)
+    avg_weight = float(s.get("avg_weight_g",  0) or 0)
+    has_warn   = bool(s.get("warnings"))
 
-    for s in filtered_states:
-        tank_name  = _html.escape(str(s.get("tank_name") or "—"))
-        biomass    = float(s.get("biomass_kg",    0) or 0)
-        density    = float(s.get("density_kg_m3", 0) or 0)
-        avg_weight = float(s.get("avg_weight_g",  0) or 0)
-        has_warn   = bool(s.get("warnings"))
+    border = "rgba(239,68,68,0.80)" if has_warn else "rgba(148,163,184,0.35)"
+    bg     = "rgba(239,68,68,0.07)" if has_warn else "rgba(255,255,255,0.05)"
 
-        border = "rgba(239,68,68,0.80)"  if has_warn else "rgba(148,163,184,0.35)"
-        bg     = "rgba(239,68,68,0.07)"  if has_warn else "rgba(255,255,255,0.05)"
+    S_CIRCLE = (
+        f"width:{CIRCLE_D}px;height:{CIRCLE_D}px;border-radius:50%;"
+        f"border:2px solid {border};background:{bg};"
+        "display:flex;flex-direction:column;"
+        "align-items:center;justify-content:center;"
+        "text-align:center;padding:12px;box-sizing:border-box;"
+    )
 
-        S_CIRCLE = (
-            f"width:158px;height:158px;border-radius:50%;"
-            f"border:2px solid {border};background:{bg};"
-            "display:flex;flex-direction:column;"
-            "align-items:center;justify-content:center;"
-            "text-align:center;padding:12px;box-sizing:border-box;"
+    comp = s.get("batch_composition", [])
+    if not comp:
+        batch_spans = f'<span style="{S_BATCH}">Unassigned</span>'
+    elif len(comp) == 1:
+        bname = _html.escape(comp[0].get("batch_name") or "—")
+        batch_spans = f'<span style="{S_BATCH}">{bname}</span>'
+    else:
+        batch_spans = "".join(
+            f'<span style="{S_BATCH}">{_html.escape(b.get("batch_name","—"))} {b.get("percentage",0):.0f}%</span>'
+            for b in comp[:3]
         )
 
-        # Build batch line(s) from batch_composition.
-        # Single batch → "Batch A" ; multi → "A 80%" + "B 20%" (one span each).
-        # All spans are concatenated on one line — no newlines allowed here.
-        comp = s.get("batch_composition", [])
-        if not comp:
-            batch_spans = f'<span style="{S_BATCH}">Unassigned</span>'
-        elif len(comp) == 1:
-            bname = _html.escape(comp[0].get("batch_name") or "—")
-            batch_spans = f'<span style="{S_BATCH}">{bname}</span>'
-        else:
-            batch_spans = "".join(
-                f'<span style="{S_BATCH}">{_html.escape(b.get("batch_name","—"))} {b.get("percentage",0):.0f}%</span>'
-                for b in comp[:3]   # cap at 3 lines to keep circle readable
+    return (
+        f'<div style="{S_CIRCLE}">'
+          f'<span style="{S_NAME}">{tank_name}</span>'
+          f'<span style="{S_BIO}">{biomass:.1f} kg</span>'
+          f'<span style="{S_DETAIL}">Density: {density:.2f} kg/m³</span>'
+          f'<span style="{S_DETAIL}">Avg: {avg_weight:.1f} g</span>'
+          f'{batch_spans}'
+        f'</div>'
+    )
+
+
+def _render_tank_detail_card(s: dict) -> None:
+    """Inline detail panel for the selected tank."""
+    with st.container(border=True):
+        head_col, close_col = st.columns([5, 1])
+        head_col.subheader(f"🔍 {s.get('tank_name', '—')}")
+        if close_col.button("✕ Close", key="tank_detail_close"):
+            st.session_state.pop("dash_selected_tank_id", None)
+            st.rerun()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Fish count",  f"{s.get('fish_count', 0):,}")
+        m2.metric("Biomass",     f"{s.get('biomass_kg', 0):.1f} kg")
+        m3.metric("Density",     f"{s.get('density_kg_m3', 0):.2f} kg/m³")
+        m4.metric("Avg weight",  f"{s.get('avg_weight_g', 0):.1f} g")
+
+        comp        = s.get("batch_composition", [])
+        batch_label = _composition_label(comp, s.get("batch_name") or "")
+
+        d1, d2 = st.columns(2)
+        d1.caption(f"**Batch:** {batch_label}")
+        d1.caption(f"**Volume:** {s.get('tank_volume_m3', 0):.1f} m³")
+        d1.caption(f"**Feed:** {s.get('feed_kg_day', 0):.2f} kg/day")
+        d2.caption(
+            f"**Daily mortality:** {s.get('daily_mortality_fish', 0)} fish "
+            f"({s.get('daily_mortality_pct', 0):.2f}%)"
+        )
+        d2.caption(
+            f"**Cumulative mortality:** {s.get('total_mortality', 0)} fish "
+            f"({s.get('cumulative_mortality_pct', 0):.1f}%)"
+        )
+
+        last_log = s.get("last_log") or {}
+        if last_log:
+            st.caption(f"**Last log:** {last_log.get('date', '—')}")
+            lc = st.columns(4)
+            log_fields = [
+                ("oxygen",         "O₂",       " mg/L"),
+                ("temperature",    "Temp",      " °C"),
+                ("ph",             "pH",        ""),
+                ("mortality_fish", "Mortality", " fish"),
+            ]
+            for i, (key, label, unit) in enumerate(log_fields):
+                v = last_log.get(key)
+                if v is not None and str(v).strip() not in ("", "None"):
+                    lc[i].metric(label, f"{v}{unit}")
+
+        warnings = s.get("warnings", [])
+        for w in warnings:
+            st.warning(w)
+
+        if s.get("grading_date"):
+            st.caption(
+                f"**Last grading:** {s.get('grading_date')}  ·  "
+                f"Avg: {s.get('grading_avg_weight_g', '—')} g  ·  "
+                f"Samples: {s.get('grading_sample_count', '—')}"
             )
 
-        # Each card is a single concatenated string — no newlines, no indentation.
-        cards_html += (
-            f'<div style="{S_ITEM}">'
-              f'<div style="{S_CIRCLE}">'
-                f'<span style="{S_NAME}">{tank_name}</span>'
-                f'<span style="{S_BIO}">{biomass:.1f} kg</span>'
-                f'<span style="{S_DETAIL}">Density: {density:.2f} kg/m³</span>'
-                f'<span style="{S_DETAIL}">Avg: {avg_weight:.1f} g</span>'
-                f'{batch_spans}'
-              f'</div>'
-            f'</div>'
+
+def _render_tank_visual_overview(filtered_states: list[dict]) -> None:
+    """
+    Circular tank cards with optional physical layout.
+
+    If any tank in *filtered_states* has non-zero layout_x / layout_y
+    (stored on the raw tank dict via s["tank"]), those tanks are placed
+    on an absolute-positioned canvas that mirrors the real farm floor plan.
+    Tanks without coordinates fall back to the auto-fit CSS grid.
+    Clicking any tank button opens an inline detail card.
+    """
+    st.subheader("Tank visual overview")
+
+    CELL_W, CELL_H = 190, 190
+    CIRCLE_D       = 158
+    CANVAS_PAD     = 28
+
+    def _layout_coords(s: dict) -> tuple[int, int]:
+        t = s.get("tank") or {}
+        return int(t.get("layout_x") or 0), int(t.get("layout_y") or 0)
+
+    positioned   = [s for s in filtered_states if any(c > 0 for c in _layout_coords(s))]
+    unpositioned = [s for s in filtered_states if not any(c > 0 for c in _layout_coords(s))]
+
+    # ── Positioned farm-map layout ─────────────────────────────────────────────
+    if positioned:
+        max_col    = max(_layout_coords(s)[0] for s in positioned)
+        max_row    = max(_layout_coords(s)[1] for s in positioned)
+        canvas_w   = max_col * CELL_W + CANVAS_PAD * 2
+        canvas_h   = max_row * CELL_H + CANVAS_PAD * 2
+
+        selected_tid = st.session_state.get("dash_selected_tank_id", "")
+
+        canvas = (
+            f'<div style="overflow-x:auto;padding-bottom:4px;">'
+            f'<div style="position:relative;width:{canvas_w}px;height:{canvas_h}px;'
+            f'background:rgba(255,255,255,0.03);border-radius:12px;'
+            f'border:1px solid rgba(148,163,184,0.15);">'
         )
 
-    st.markdown(
-        f'<div style="{S_GRID}">{cards_html}</div>',
-        unsafe_allow_html=True,
-    )
+        for s in positioned:
+            col, row = _layout_coords(s)
+            cx   = (col - 1) * CELL_W + CELL_W // 2 + CANVAS_PAD
+            cy   = (row - 1) * CELL_H + CELL_H // 2 + CANVAS_PAD
+            left = cx - CIRCLE_D // 2
+            top  = cy - CIRCLE_D // 2
+            tid  = s.get("tank_id", "")
+            # Highlight ring for selected tank
+            ring = (
+                "outline:3px solid rgba(99,179,237,0.90);outline-offset:3px;"
+                if tid == selected_tid else ""
+            )
+            inner = _circle_html(s)
+            # Wrap in absolute-positioned container
+            canvas += (
+                f'<div style="position:absolute;left:{left}px;top:{top}px;'
+                f'border-radius:50%;{ring}">{inner}</div>'
+            )
+
+        canvas += '</div></div>'
+        st.markdown(canvas, unsafe_allow_html=True)
+
+    # ── Auto-grid fallback ─────────────────────────────────────────────────────
+    grid_tanks = unpositioned if positioned else filtered_states
+
+    if grid_tanks:
+        if positioned:
+            st.caption(f"Tanks without layout coordinates ({len(grid_tanks)}):")
+        S_GRID = ("display:grid;grid-template-columns:repeat(auto-fit,minmax(162px,1fr));"
+                  "gap:20px;padding:6px 0 20px 0;")
+        S_ITEM = "display:flex;justify-content:center;"
+        grid_html = f'<div style="{S_GRID}">'
+        for s in grid_tanks:
+            grid_html += f'<div style="{S_ITEM}">{_circle_html(s)}</div>'
+        grid_html += '</div>'
+        st.markdown(grid_html, unsafe_allow_html=True)
+
+    # ── Tank selector buttons ──────────────────────────────────────────────────
+    st.caption("Select a tank to view details:")
+    COLS_PER_ROW = 6
+    for row_start in range(0, len(filtered_states), COLS_PER_ROW):
+        row_slice = filtered_states[row_start : row_start + COLS_PER_ROW]
+        btn_cols  = st.columns(len(row_slice))
+        for i, s in enumerate(row_slice):
+            tid      = s.get("tank_id", "")
+            tname    = s.get("tank_name", "—")
+            has_warn = bool(s.get("warnings"))
+            label    = f"⚠️ {tname}" if has_warn else tname
+            is_sel   = st.session_state.get("dash_selected_tank_id") == tid
+            if btn_cols[i].button(
+                label,
+                key=f"tank_sel_{tid}",
+                type="primary" if is_sel else "secondary",
+                use_container_width=True,
+            ):
+                if is_sel:
+                    st.session_state.pop("dash_selected_tank_id", None)
+                else:
+                    st.session_state["dash_selected_tank_id"] = tid
+                st.rerun()
+
+    # ── Detail card ────────────────────────────────────────────────────────────
+    selected_tid = st.session_state.get("dash_selected_tank_id")
+    if selected_tid:
+        matched = next(
+            (s for s in filtered_states if s.get("tank_id") == selected_tid), None
+        )
+        if matched:
+            _render_tank_detail_card(matched)
+        else:
+            # Selected tank not in current unit — clear stale selection
+            st.session_state.pop("dash_selected_tank_id", None)
 
 
 def _render_chemical_usage(daily_logs: list[dict], selected_unit: str) -> None:
