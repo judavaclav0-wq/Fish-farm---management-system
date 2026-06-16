@@ -72,18 +72,28 @@ def hash_password(plain: str) -> str:
 _DEFAULT_COOKIE = {
     "name":         "growout_session",
     "key":          "CHANGE_ME_IN_PRODUCTION_SECRET_KEY_32",
-    "expiry_days":  1,
+    "expiry_days":  14,   # 14-day persistent cookie; survived phone-lock reconnects
 }
+
+_MIN_EXPIRY_DAYS = 14   # Minimum we enforce even on existing installs
 
 
 def _load_cookie_config() -> dict:
-    """Return cookie settings from users.yaml, or fall back to defaults."""
+    """Return cookie settings from users.yaml, or fall back to defaults.
+
+    Silently upgrades expiry_days to _MIN_EXPIRY_DAYS if the saved value is
+    too short — this fixes existing installs that still have expiry_days=1.
+    """
     if _YAML_FILE.exists():
         try:
             with open(_YAML_FILE, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
             if "cookie" in cfg:
-                return cfg["cookie"]
+                cookie = cfg["cookie"]
+                if int(cookie.get("expiry_days", 1)) < _MIN_EXPIRY_DAYS:
+                    cookie["expiry_days"] = _MIN_EXPIRY_DAYS
+                    _save_cookie_config(cookie)
+                return cookie
         except Exception:
             pass
     return _DEFAULT_COOKIE.copy()
@@ -288,6 +298,14 @@ def ensure_authenticated() -> bool:
     with col_center:
         st.markdown("## Growout + Pregrow Management System")
         st.caption("Please log in to continue.")
+
+        # Inform the user that their form data survived the session expiry.
+        if st.session_state.get("_preserved_form_data"):
+            st.warning(
+                "**Session expired.** Please log in again. "
+                "Your entered data were preserved and will be restored after login."
+            )
+
         st.divider()
 
         auth = _get_authenticator()
