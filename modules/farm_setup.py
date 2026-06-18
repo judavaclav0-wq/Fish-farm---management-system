@@ -214,8 +214,8 @@ def _render_tank_editor(farm: dict, sys: dict, tank: dict, batches: list) -> Non
 
         new_avg_weight = r2b.number_input(
             "Avg weight (g)",
-            min_value=0.1,
-            value=safe_float(tank.get("avg_weight_g"), 100.0),
+            min_value=0.0,
+            value=safe_float(tank.get("avg_weight_g"), 0.0),
             step=1.0,
             format="%.1f",
             key=f"{tid}_weight",
@@ -474,8 +474,8 @@ def _render_add_tank(farm: dict, sys: dict, batches: list) -> None:
         t_fish = row2a.number_input("Fish count", min_value=0, value=0, step=10)
         t_avg_weight = row2b.number_input(
             "Avg weight (g)",
-            min_value=0.1,
-            value=100.0,
+            min_value=0.0,
+            value=0.0,
             step=1.0,
             format="%.1f",
         )
@@ -679,7 +679,7 @@ def _migrate_farm(farm: dict) -> dict:
         for tank in sys.get("tanks", []):
             if "fish_count" not in tank:
                 old_biomass = safe_float(tank.get("biomass_kg"), 0.0)
-                old_weight  = safe_float(tank.get("avg_weight_g"), 100.0)
+                old_weight  = safe_float(tank.get("avg_weight_g"), 0.0)
 
                 if old_weight > 0 and old_biomass > 0:
                     tank["fish_count"] = old_biomass / (old_weight / 1000.0)
@@ -689,7 +689,7 @@ def _migrate_farm(farm: dict) -> dict:
                 changed = True
 
             fish_c   = safe_float(tank.get("fish_count"), 0.0)
-            weight_c = safe_float(tank.get("avg_weight_g"), 100.0)
+            weight_c = safe_float(tank.get("avg_weight_g"), 0.0)
             tank["biomass_kg"] = fish_c * weight_c / 1000.0
 
             # Normalize old alias fields into canonical field names.
@@ -706,7 +706,7 @@ def _migrate_farm(farm: dict) -> dict:
                 changed = True
 
             defaults = {
-                "avg_weight_g":              100.0,
+                "avg_weight_g":              0.0,
                 "feed_kg_day":               0.0,
                 "tank_volume_m3":            10.0,
                 "max_mortality_percent_day": 0.5,

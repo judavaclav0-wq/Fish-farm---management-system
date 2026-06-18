@@ -261,7 +261,7 @@ def render() -> None:
 
                 col3, col4, col5 = st.columns(3)
                 b_fish    = col3.number_input("Initial fish count", min_value=1, value=1000, step=100)
-                b_weight  = col4.number_input("Initial avg weight (g)", min_value=0.1, value=50.0, step=0.5)
+                b_weight  = col4.number_input("Initial avg weight (g)", min_value=0.0, value=0.0, step=0.5)
                 b_biomass = col5.number_input(
                     "Initial biomass (kg)",
                     min_value=0.0,
@@ -556,8 +556,8 @@ def render() -> None:
                             )
                             e_weight = ef.number_input(
                                 "Initial avg weight (g)",
-                                min_value=0.1,
-                                value=float(batch.get("initial_avg_weight_g", 50.0) or 50.0),
+                                min_value=0.0,
+                                value=float(batch.get("initial_avg_weight_g", 0.0) or 0.0),
                                 step=0.5,
                                 key=f"ew_{bid}",
                             )

@@ -162,8 +162,8 @@ def render() -> None:
         else:
             quantity_kg = st.number_input(
                 "Biomass quantity (kg)",
-                min_value=0.1,
-                value=10.0,
+                min_value=0.0,
+                value=0.0,
                 step=0.5,
                 format="%.2f",
             )
@@ -571,8 +571,8 @@ def render() -> None:
         else:
             edit_quantity_kg = st.number_input(
                 "Biomass quantity (kg)",
-                min_value=0.1,
-                value=max(0.1, float(selected_move.get("quantity_kg", 0.1))),
+                min_value=0.0,
+                value=float(selected_move.get("quantity_kg", 0.0)),
                 step=0.5,
                 format="%.2f",
                 key=f"edit_quantity_kg_{selected_id}",
