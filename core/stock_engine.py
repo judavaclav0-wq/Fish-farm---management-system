@@ -570,6 +570,38 @@ def compute_tank_state(
     harvested_fish = sum(_movement_quantity_fish(m) for m in harvest_moves_out)
     transferred_out_fish = sum(_movement_quantity_fish(m) for m in transfer_moves_out)
 
+    # ── Weighted avg_weight from movements ────────────────────────────────
+    # Recalculate avg_weight_g as a biomass-weighted blend of the base stock
+    # and all incoming transfers.  Outflows and mortality are removed at the
+    # blended rate (proportional — they don't change the per-fish weight).
+    # Skipped when a grading-log measurement is available, which is always
+    # more accurate than the movement-derived estimate.
+    if not (grading_avg_weight_g is not None and grading_avg_weight_g > 0):
+        base_avg = safe_float(tank.get("avg_weight_g"), 0.0)
+        wt_biomass_g = float(base_fish_count) * base_avg
+        wt_fish      = float(base_fish_count)
+
+        for m in transfer_moves_in:
+            qty   = _movement_quantity_fish(m)
+            m_avg = safe_float(m.get("avg_weight_g"), 0.0)
+            if m_avg > 0:
+                wt_biomass_g += qty * m_avg
+            else:
+                # No avg stored in movement: assume same weight as current blend
+                blend = wt_biomass_g / wt_fish if wt_fish > 0 else base_avg
+                wt_biomass_g += qty * blend
+            wt_fish += qty
+
+        # Remove outflows + mortality proportionally (no change to per-fish weight)
+        total_out_fish = float(moved_out_fish + total_mortality)
+        if wt_fish > 0 and total_out_fish > 0:
+            blend    = wt_biomass_g / wt_fish
+            remove   = min(total_out_fish, wt_fish)
+            wt_biomass_g = max(0.0, wt_biomass_g - remove * blend)
+            wt_fish      = max(0.0, wt_fish - remove)
+
+        avg_weight_g = round(wt_biomass_g / wt_fish, 1) if wt_fish > 0 else 0.0
+
     # ── Stock adjustments (count reconciliation) ─────────────────────────
     filtered_adj = _filter_by_date(adjustments or [], as_of_date)
     tank_adj = [
