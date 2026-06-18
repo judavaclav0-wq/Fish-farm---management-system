@@ -107,9 +107,15 @@ def _matches_tank(move: dict, tank: dict, tank_id: str, prefix: str) -> bool:
 
 
 def _movement_type(move: dict) -> str:
-    """Normalise movement type (handles legacy values)."""
+    """Normalise movement type (handles legacy values).
+
+    "killing" maps to "harvest" so it reduces source stock without adding to a
+    destination.  The raw stored value "killing" is what the dashboard uses to
+    exclude killing records from the Harvest Overview.
+    """
     raw = str(move.get("movement_type", "transfer") or "transfer").strip().lower()
-    if raw in {"harvest", "harvest / slaughter", "slaughter", "culling"}:
+    if raw in {"harvest", "harvest / slaughter", "harvest/slaughter",
+               "slaughter", "culling", "killing"}:
         return "harvest"
     return "transfer"
 

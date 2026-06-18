@@ -32,7 +32,7 @@ def render() -> None:
     with tab_new:
         movement_type = st.selectbox(
             "Movement type",
-            ["Transfer", "Harvest / slaughter"],
+            ["Transfer", "Harvest/Slaughter", "Killing"],
         )
 
         col1, col2 = st.columns(2)
@@ -132,20 +132,31 @@ def render() -> None:
             )
             st.caption(f"Estimated fish moved: **{quantity_fish:,} fish**")
 
-        reason_options = (
-            ["Grading", "Thinning", "Stage transfer", "Emergency", "Other"]
-            if movement_type == "Transfer"
-            else ["Harvest", "Slaughter", "Culling", "Other"]
-        )
-
-        reason = st.selectbox("Reason", reason_options)
-        mv_notes = st.text_area("Notes", height=68)
+        if movement_type == "Transfer":
+            reason = st.selectbox(
+                "Reason",
+                ["Grading", "Stage transfer", "Emergency", "Splitting", "Other"],
+                key="mv_transfer_reason",
+            )
+        elif movement_type == "Harvest/Slaughter":
+            st.caption("Reason: **Harvesting**")
+            reason = "Harvesting"
+        else:  # Killing
+            reason = st.text_area(
+                "Reason",
+                height=68,
+                placeholder="Describe the cause — disease, injury, culling decision…",
+                key="mv_killing_reason",
+            )
+        mv_notes = st.text_area("Notes", height=68, key="mv_notes")
 
         submitted = st.button("Save movement", type="primary")
 
         if submitted:
             if quantity_fish <= 0:
                 st.error("Quantity must be greater than zero.")
+            elif movement_type == "Killing" and not str(reason).strip():
+                st.error("Please enter a reason for the killing.")
             elif quantity_fish > current_fish:
                 st.error(
                     f"Cannot move {quantity_fish:,} fish — only "
@@ -156,8 +167,11 @@ def render() -> None:
                     "id": storage.new_id("mv_"),
                     "date": str(mv_date),
 
-                    "movement_type": "transfer"
-                    if movement_type == "Transfer" else "harvest",
+                    "movement_type": {
+                        "Transfer":          "transfer",
+                        "Harvest/Slaughter": "harvest",
+                        "Killing":           "killing",
+                    }.get(movement_type, "transfer"),
 
                     "from_system_name": from_system,
                     "from_tank_id": from_tank["id"],
@@ -167,8 +181,8 @@ def render() -> None:
                     "to_tank_id": to_tank["id"] if to_tank else None,
                     "to_tank_name": to_tank["name"] if to_tank else "",
 
-                    "destination": "Slaughter"
-                    if movement_type == "Harvest / slaughter" else "",
+                    "destination": "Harvest/Slaughter"
+                    if movement_type == "Harvest/Slaughter" else "",
 
                     "quantity_mode": "fish"
                     if quantity_mode == "Fish count" else "kg",
@@ -195,12 +209,20 @@ def render() -> None:
                         f"Movement saved: {quantity_fish:,} fish from "
                         f"{from_tank_name} → {to_tank_name}."
                     )
-                else:
+                elif movement_type == "Harvest/Slaughter":
                     mv_summary = (
-                        f"Created harvest: {quantity_fish:,} fish from {from_tank_name}"
+                        f"Created harvest/slaughter: {quantity_fish:,} fish from {from_tank_name}"
                     )
                     st.success(
                         f"Harvest saved: {quantity_fish:,} fish removed from "
+                        f"{from_tank_name}."
+                    )
+                else:  # Killing
+                    mv_summary = (
+                        f"Created killing record: {quantity_fish:,} fish from {from_tank_name}"
+                    )
+                    st.success(
+                        f"Killing recorded: {quantity_fish:,} fish removed from "
                         f"{from_tank_name}."
                     )
 
@@ -295,16 +317,21 @@ def render() -> None:
 
         st.markdown("### Selected movement")
 
-        edit_type_default = (
-            "Transfer"
-            if selected_move.get("movement_type", "transfer") == "transfer"
-            else "Harvest / slaughter"
+        _STORED_TO_DISPLAY = {
+            "transfer": "Transfer",
+            "harvest":  "Harvest/Slaughter",
+            "killing":  "Killing",
+        }
+        _EDIT_TYPES = ["Transfer", "Harvest/Slaughter", "Killing"]
+        edit_type_default = _STORED_TO_DISPLAY.get(
+            str(selected_move.get("movement_type", "transfer")).strip().lower(),
+            "Transfer",
         )
 
         edit_type = st.selectbox(
             "Movement type",
-            ["Transfer", "Harvest / slaughter"],
-            index=["Transfer", "Harvest / slaughter"].index(edit_type_default),
+            _EDIT_TYPES,
+            index=_EDIT_TYPES.index(edit_type_default),
             key=f"edit_type_{selected_id}",
         )
 
@@ -467,21 +494,26 @@ def render() -> None:
             )
             st.caption(f"Estimated fish moved: **{edit_quantity_fish:,} fish**")
 
-        edit_reason_options = (
-            ["Grading", "Thinning", "Stage transfer", "Emergency", "Other"]
-            if edit_type == "Transfer"
-            else ["Harvest", "Slaughter", "Culling", "Other"]
-        )
-
-        reason_default = selected_move.get("reason", edit_reason_options[0])
-        reason_idx = edit_reason_options.index(reason_default) if reason_default in edit_reason_options else 0
-
-        edit_reason = st.selectbox(
-            "Reason",
-            edit_reason_options,
-            index=reason_idx,
-            key=f"edit_reason_{selected_id}",
-        )
+        if edit_type == "Transfer":
+            _edit_reason_opts = ["Grading", "Stage transfer", "Emergency", "Splitting", "Other"]
+            reason_default = selected_move.get("reason", _edit_reason_opts[0])
+            reason_idx = _edit_reason_opts.index(reason_default) if reason_default in _edit_reason_opts else 0
+            edit_reason = st.selectbox(
+                "Reason",
+                _edit_reason_opts,
+                index=reason_idx,
+                key=f"edit_reason_{selected_id}",
+            )
+        elif edit_type == "Harvest/Slaughter":
+            st.caption("Reason: **Harvesting**")
+            edit_reason = "Harvesting"
+        else:  # Killing
+            edit_reason = st.text_area(
+                "Reason",
+                value=selected_move.get("reason", ""),
+                height=68,
+                key=f"edit_reason_killing_{selected_id}",
+            )
 
         edit_notes = st.text_area(
             "Notes",
@@ -495,6 +527,8 @@ def render() -> None:
         if col_save.button("Save changes", type="primary", key=f"save_movement_{selected_id}"):
             if edit_quantity_fish <= 0:
                 st.error("Quantity must be greater than zero.")
+            elif edit_type == "Killing" and not str(edit_reason).strip():
+                st.error("Please enter a reason for the killing.")
             elif edit_quantity_fish > edit_current_fish:
                 st.error(
                     f"Cannot move {edit_quantity_fish:,} fish — only "
@@ -505,8 +539,11 @@ def render() -> None:
                     "id": selected_id,
                     "date": str(edit_date),
 
-                    "movement_type": "transfer"
-                    if edit_type == "Transfer" else "harvest",
+                    "movement_type": {
+                        "Transfer":          "transfer",
+                        "Harvest/Slaughter": "harvest",
+                        "Killing":           "killing",
+                    }.get(edit_type, "transfer"),
 
                     "from_system_name": edit_from_system,
                     "from_tank_id": edit_from_tank["id"],
@@ -516,8 +553,8 @@ def render() -> None:
                     "to_tank_id": edit_to_tank["id"] if edit_to_tank else None,
                     "to_tank_name": edit_to_tank["name"] if edit_to_tank else "",
 
-                    "destination": "Slaughter"
-                    if edit_type == "Harvest / slaughter" else "",
+                    "destination": "Harvest/Slaughter"
+                    if edit_type == "Harvest/Slaughter" else "",
 
                     "quantity_mode": "fish"
                     if edit_quantity_mode == "Fish count" else "kg",
@@ -543,7 +580,7 @@ def render() -> None:
                     module="Movements",
                     action="update",
                     summary=(
-                        f"Updated {'transfer' if edit_type == 'Transfer' else 'harvest'}: "
+                        f"Updated {edit_type.lower()}: "
                         f"{edit_quantity_fish:,} fish from {edit_from_tank_name}"
                     ),
                     date=str(edit_date),
