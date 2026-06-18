@@ -448,6 +448,7 @@ def render() -> None:
     daily_logs   = storage.load_daily_logs()
     movements    = storage.load_movements()
     grading_logs = storage.load_grading_logs()
+    adjustments  = storage.load_adjustments()
 
     # ── View mode ───────────────────────────────────────────
     view_mode = st.radio(
@@ -475,6 +476,7 @@ def render() -> None:
         movements,
         as_of_date=as_of_date,
         grading_logs=grading_logs,
+        adjustments=adjustments,
     )
 
     if not tank_states:

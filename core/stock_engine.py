@@ -257,6 +257,7 @@ def _compute_all_batch_compositions(
     daily_logs:  list[dict],
     movements:   list[dict],
     as_of_date:  str | None = None,
+    adjustments: list[dict] | None = None,
 ) -> dict:
     """
     Replay all events in date order to compute current batch composition per tank.
@@ -318,13 +319,21 @@ def _compute_all_batch_compositions(
     batch_mortality: dict[str, int] = {}
 
     # ── Step 2: Filter events by as_of_date ────────────────────────────────
-    filtered_moves = _filter_by_date(movements,  as_of_date)
-    filtered_logs  = _filter_by_date(daily_logs, as_of_date)
+    filtered_moves = _filter_by_date(movements,          as_of_date)
+    filtered_logs  = _filter_by_date(daily_logs,         as_of_date)
+    filtered_adjs  = _filter_by_date(adjustments or [], as_of_date)
+
+    adj_by_date: dict[str, list] = {}
+    for adj in filtered_adjs:
+        d = adj.get("date", "")
+        if d:
+            adj_by_date.setdefault(d, []).append(adj)
 
     # ── Step 3: Collect all event dates (sorted) ───────────────────────────
     all_dates = sorted(set(
         [m.get("date", "") for m in filtered_moves if m.get("date")]
         + [l.get("date", "") for l in filtered_logs  if l.get("date")]
+        + list(adj_by_date.keys())
     ))
 
     # Group movements by date
@@ -409,6 +418,31 @@ def _compute_all_batch_compositions(
             # Clean up after mortality — remove zero and unassigned-dust entries
             state[tank_id] = _clean_composition(tank_comp)
 
+        # ── 4c. Stock adjustments (count reconciliation) ─────────────────────
+        for adj in adj_by_date.get(date_str, []):
+            adj_ref = _norm(adj.get("tank_id", "")) or _norm(adj.get("tank_name", ""))
+            cid = tank_lookup.get(adj_ref, (None, None))[0] if adj_ref else None
+            if not cid:
+                continue
+            variance = safe_int(adj.get("variance"), 0)
+            if variance == 0:
+                continue
+            tank_comp  = state.get(cid, {})
+            total_fish = sum(tank_comp.values())
+            if variance < 0:
+                reduction = min(abs(variance), total_fish)
+                if reduction > 0:
+                    split = proportional_split(reduction, tank_comp)
+                    for bid, cnt in split.items():
+                        tank_comp[bid] = max(0, tank_comp.get(bid, 0) - cnt)
+            elif total_fish > 0:
+                split = proportional_split(variance, tank_comp)
+                for bid, cnt in split.items():
+                    tank_comp[bid] = tank_comp.get(bid, 0) + cnt
+            else:
+                tank_comp[""] = tank_comp.get("", 0) + variance
+            state[cid] = _clean_composition(tank_comp)
+
     return {"state": state, "mortality": batch_mortality}
 
 
@@ -423,7 +457,8 @@ def compute_tank_state(
     movements:          list[dict] | None = None,
     as_of_date:         str | None = None,
     grading_logs:       list[dict] | None = None,
-    batch_compositions: dict | None = None,   # NEW: pre-computed by compute_farm_state
+    batch_compositions: dict | None = None,   # pre-computed by compute_farm_state
+    adjustments:        list[dict] | None = None,
 ) -> dict[str, Any]:
     """
     Compute current state for a single tank.
@@ -535,8 +570,20 @@ def compute_tank_state(
     harvested_fish = sum(_movement_quantity_fish(m) for m in harvest_moves_out)
     transferred_out_fish = sum(_movement_quantity_fish(m) for m in transfer_moves_out)
 
+    # ── Stock adjustments (count reconciliation) ─────────────────────────
+    filtered_adj = _filter_by_date(adjustments or [], as_of_date)
+    tank_adj = [
+        a for a in filtered_adj
+        if _same_tank_id(a.get("tank_id"), tank_id)
+        or _same_tank_fallback(a.get("tank_name"), tank, tank_id)
+    ]
+    total_adj_variance = sum(safe_int(a.get("variance"), 0) for a in tank_adj)
+
     # ── Core fish count ───────────────────────────────────────────────────
-    raw_fish_count     = base_fish_count + moved_in_fish - moved_out_fish - total_mortality
+    raw_fish_count = (
+        base_fish_count + moved_in_fish - moved_out_fish
+        - total_mortality + total_adj_variance
+    )
     current_fish_count = max(0, raw_fish_count)
 
     biomass = calculate_biomass_kg(current_fish_count, avg_weight_g)
@@ -685,12 +732,14 @@ def compute_tank_state(
         "grading_status": grading_status,
         "grading_notes":  grading_notes,
 
-        "base_fish_count":      base_fish_count,
-        "moved_in_fish":        moved_in_fish,
-        "moved_out_fish":       moved_out_fish,
-        "transferred_out_fish": transferred_out_fish,
-        "harvested_fish":       harvested_fish,
-        "total_mortality":      total_mortality,
+        "base_fish_count":        base_fish_count,
+        "moved_in_fish":          moved_in_fish,
+        "moved_out_fish":         moved_out_fish,
+        "transferred_out_fish":   transferred_out_fish,
+        "harvested_fish":         harvested_fish,
+        "total_mortality":        total_mortality,
+        "total_adj_variance":     total_adj_variance,
+        "adjustment_count":       len(tank_adj),
 
         "daily_mortality_fish":    daily_mortality_fish,
         "daily_mortality_pct":     round(daily_mortality_pct, 2),
@@ -739,6 +788,7 @@ def compute_farm_state(
     movements:    list[dict] | None = None,
     as_of_date:   str | None = None,
     grading_logs: list[dict] | None = None,
+    adjustments:  list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Compute current state for every tank in the farm.
@@ -749,7 +799,8 @@ def compute_farm_state(
     """
     # Pre-compute batch compositions for all tanks in a single chronological pass
     comp_result        = _compute_all_batch_compositions(
-        farm_data, batches, daily_logs or [], movements or [], as_of_date
+        farm_data, batches, daily_logs or [], movements or [], as_of_date,
+        adjustments=adjustments,
     )
     batch_compositions = comp_result["state"]   # {tank_id: {batch_id: fish_count}}
 
@@ -763,6 +814,7 @@ def compute_farm_state(
             as_of_date=as_of_date,
             grading_logs=grading_logs or [],
             batch_compositions=batch_compositions,
+            adjustments=adjustments,
         )
         for tank in tanks
     ]
@@ -775,6 +827,7 @@ def compute_batch_summary(
     movements:    list[dict],
     grading_logs: list[dict] | None = None,
     as_of_date:   str | None = None,
+    adjustments:  list[dict] | None = None,
 ) -> list[dict]:
     """
     Return per-batch roll-up: current fish, mortality, tank distribution.
@@ -794,7 +847,8 @@ def compute_batch_summary(
     }
     """
     comp_result     = _compute_all_batch_compositions(
-        farm_data, batches, daily_logs or [], movements or [], as_of_date
+        farm_data, batches, daily_logs or [], movements or [], as_of_date,
+        adjustments=adjustments,
     )
     state           = comp_result["state"]      # {tank_id: {batch_id: fish_count}}
     batch_mortality = comp_result["mortality"]  # {batch_id: total_died_from_mortality}

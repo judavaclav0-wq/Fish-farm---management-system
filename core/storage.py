@@ -236,6 +236,32 @@ def _grd_row(r: dict) -> dict:
     }
 
 
+def _adj_row(r: dict) -> dict:
+    """Build a stock_adjustments table row from a count-reconciliation record."""
+    return {
+        "id":          r.get("id", new_id("adj_")),
+        "date":        r.get("date", ""),
+        "tank_id":     r.get("tank_id", ""),
+        "tank_name":   r.get("tank_name", ""),
+        "system_name": r.get("system_name", ""),
+        "payload":     r,
+        "updated_at":  _now_iso(),
+    }
+
+
+def _sb_load_adjustments() -> list[dict]:
+    result = _sb().table("stock_adjustments").select("payload").order("date").execute()
+    return [row["payload"] for row in (result.data or [])]
+
+
+def _sb_append_adjustment(record: dict) -> None:
+    _sb().table("stock_adjustments").upsert(_adj_row(record)).execute()
+
+
+def _sb_save_adjustments(records: list[dict]) -> None:
+    _sb_replace("stock_adjustments", [_adj_row(r) for r in records])
+
+
 def _sb_replace(table: str, rows: list[dict]) -> None:
     """Full-replacement upsert for any table that supports it.
 
@@ -536,6 +562,29 @@ def save_movements(records: list[dict]) -> None:
         _sb_save_movements(records)
         return
     save_jsonl("movements.jsonl", records)
+
+
+# ── Stock adjustments (count reconciliation) ──────────────────────────────────
+
+def load_adjustments() -> list[dict]:
+    """Return all count-reconciliation adjustment records."""
+    if _use_supabase():
+        return _sb_load_adjustments()
+    return load_jsonl("adjustments.jsonl")
+
+
+def append_adjustment(record: dict) -> None:
+    if _use_supabase():
+        _sb_append_adjustment(record)
+        return
+    append_jsonl("adjustments.jsonl", record)
+
+
+def save_adjustments(records: list[dict]) -> None:
+    if _use_supabase():
+        _sb_save_adjustments(records)
+        return
+    save_jsonl("adjustments.jsonl", records)
 
 
 # ── Grading / histograms ──────────────────────────────────────────────────────

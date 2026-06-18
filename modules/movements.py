@@ -5,7 +5,7 @@ Movements — record fish transfers between tanks.
 
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from core import storage
 from core.stock_engine import get_all_tanks, compute_tank_state
 
@@ -14,11 +14,12 @@ from core.stock_engine import get_all_tanks, compute_tank_state
 def render() -> None:
     st.header("Fish Movements")
 
-    farm       = storage.load_farm()
-    tanks      = get_all_tanks(farm)
-    batches    = storage.load_batches()
-    daily_logs = storage.load_daily_logs()
-    movements  = storage.load_movements()
+    farm        = storage.load_farm()
+    tanks       = get_all_tanks(farm)
+    batches     = storage.load_batches()
+    daily_logs  = storage.load_daily_logs()
+    movements   = storage.load_movements()
+    adjustments = storage.load_adjustments()
 
     if not tanks:
         st.warning("At least one tank is needed to record a movement.")
@@ -26,7 +27,9 @@ def render() -> None:
 
     system_names = sorted({t.get("system_name", "—") for t in tanks})
 
-    tab_new, tab_history = st.tabs(["Record movement", "History"])
+    tab_new, tab_history, tab_adjustments = st.tabs(
+        ["Record movement", "History", "Count Adjustments"]
+    )
 
     # ── New movement ───────────────────────────────────────────────────────
     with tab_new:
@@ -55,6 +58,7 @@ def render() -> None:
             batches=batches,
             daily_logs=daily_logs,
             movements=movements,
+            adjustments=adjustments,
         )
 
         current_fish = src_state.get("fish_count", 0) if src_state else 0
@@ -96,6 +100,43 @@ def render() -> None:
             to_tank_names = sorted([t["name"] for t in to_system_tanks])
             to_tank_name = col6.selectbox("To tank", to_tank_names)
             to_tank = next(t for t in to_system_tanks if t["name"] == to_tank_name)
+
+        # ── Count reconciliation (Transfer only) ──────────────────────────────
+        has_adjustment      = False
+        actual_count        = current_fish
+        adjustment_variance = 0
+        adjustment_note     = ""
+
+        if movement_type == "Transfer":
+            has_adjustment = st.checkbox(
+                "Actual counted fish differs from system count",
+                key="mv_has_adjustment",
+            )
+            if has_adjustment:
+                with st.container(border=True):
+                    st.caption(
+                        "**Count reconciliation** — corrects the stock before this transfer "
+                        "and records the discrepancy as a separate audit entry."
+                    )
+                    rc1, rc2, rc3 = st.columns(3)
+                    rc1.metric("Expected (system)", f"{current_fish:,}")
+                    actual_count = rc2.number_input(
+                        "Actual counted fish",
+                        min_value=0,
+                        value=current_fish,
+                        step=1,
+                        key="mv_actual_count",
+                    )
+                    _adj_v = int(actual_count) - current_fish
+                    _sign  = "+" if _adj_v >= 0 else ""
+                    _pct   = (_adj_v / current_fish * 100) if current_fish > 0 else 0.0
+                    rc3.metric("Variance", f"{_sign}{_adj_v:,} fish", f"{_sign}{_pct:.1f}%")
+                    adjustment_note = st.text_input(
+                        "Adjustment note (optional)",
+                        placeholder="Reason for discrepancy…",
+                        key="mv_adj_note",
+                    )
+                    adjustment_variance = _adj_v
 
         st.divider()
 
@@ -153,15 +194,22 @@ def render() -> None:
         submitted = st.button("Save movement", type="primary")
 
         if submitted:
+            fish_for_validation = int(actual_count) if has_adjustment else current_fish
             if quantity_fish <= 0:
                 st.error("Quantity must be greater than zero.")
             elif movement_type == "Killing" and not str(reason).strip():
                 st.error("Please enter a reason for the killing.")
-            elif quantity_fish > current_fish:
-                st.error(
-                    f"Cannot move {quantity_fish:,} fish — only "
-                    f"{current_fish:,} available in {from_tank_name}."
-                )
+            elif quantity_fish > fish_for_validation:
+                if has_adjustment:
+                    st.error(
+                        f"Cannot move {quantity_fish:,} fish — only "
+                        f"{fish_for_validation:,} fish counted in {from_tank_name}."
+                    )
+                else:
+                    st.error(
+                        f"Cannot move {quantity_fish:,} fish — only "
+                        f"{fish_for_validation:,} available in {from_tank_name}."
+                    )
             else:
                 record = {
                     "id": storage.new_id("mv_"),
@@ -199,6 +247,49 @@ def render() -> None:
                 }
 
                 storage.append_movement(record)
+
+                # Save count-reconciliation adjustment if checkbox was used
+                if has_adjustment and adjustment_variance != 0:
+                    adj_record = {
+                        "id":             storage.new_id("adj_"),
+                        "date":           str(mv_date),
+                        "timestamp":      datetime.now().isoformat(),
+                        "tank_id":        from_tank["id"],
+                        "tank_name":      from_tank_name,
+                        "system_name":    from_system,
+                        "batch_id":       batch_id or "",
+                        "batch_name":     batch_name or "",
+                        "expected_count": current_fish,
+                        "actual_count":   int(actual_count),
+                        "variance":       adjustment_variance,
+                        "variance_pct":   round(
+                            adjustment_variance / current_fish * 100, 2
+                        ) if current_fish > 0 else 0.0,
+                        "note":           adjustment_note.strip() if adjustment_note else "",
+                        "movement_id":    record["id"],
+                        "operator":       mv_operator.strip(),
+                    }
+                    storage.append_adjustment(adj_record)
+                    storage.log_activity(
+                        module="Movements",
+                        action="adjustment",
+                        summary=(
+                            f"Count adjustment: {from_tank_name} expected "
+                            f"{current_fish:,}, actual {int(actual_count):,} "
+                            f"(variance {adjustment_variance:+,})"
+                        ),
+                        date=str(mv_date),
+                        system_name=from_system,
+                        tank_id=str(from_tank.get("id", "")),
+                        tank_name=from_tank_name,
+                        operator=mv_operator.strip(),
+                        details={
+                            "expected_count": current_fish,
+                            "actual_count":   int(actual_count),
+                            "variance":       adjustment_variance,
+                            "adjustment_id":  adj_record["id"],
+                        },
+                    )
 
                 if movement_type == "Transfer":
                     mv_summary = (
@@ -429,10 +520,8 @@ def render() -> None:
             tank=edit_from_tank,
             batches=batches,
             daily_logs=daily_logs,
-            movements=[
-                move for move in movements
-                if move.get("id") != selected_id
-            ],
+            movements=[m for m in movements if m.get("id") != selected_id],
+            adjustments=adjustments,
         )
 
         edit_current_fish = edit_src_state.get("fish_count", 0) if edit_src_state else 0
@@ -614,3 +703,106 @@ def render() -> None:
             )
             st.success("Movement deleted.")
             st.rerun()
+
+    # ── Count Adjustments tab ─────────────────────────────────────────────────
+    with tab_adjustments:
+        if not adjustments:
+            st.info("No count adjustments recorded yet.")
+        else:
+            df_adj = pd.DataFrame(adjustments)
+
+            # ── Summary stats ──────────────────────────────────────────────────
+            var_col   = df_adj["variance"] if "variance" in df_adj.columns else pd.Series([], dtype=int)
+            total_pos = int(var_col[var_col > 0].sum()) if len(var_col) else 0
+            total_neg = int(var_col[var_col < 0].sum()) if len(var_col) else 0
+            net_adj   = int(var_col.sum()) if len(var_col) else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Adjustments recorded", len(adjustments))
+            m2.metric("Total positive",       f"+{total_pos:,}")
+            m3.metric("Total negative",       f"{total_neg:,}")
+            m4.metric("Net adjustment",       f"{net_adj:+,}")
+
+            st.divider()
+
+            # ── Date filter ────────────────────────────────────────────────────
+            avail_dates = sorted(
+                df_adj["date"].unique().tolist() if "date" in df_adj.columns else [],
+                reverse=True,
+            )
+            sel_dates = st.multiselect(
+                "Filter by date",
+                avail_dates,
+                default=avail_dates[:14],
+                key="adj_date_filter",
+            )
+            if sel_dates and "date" in df_adj.columns:
+                df_adj = df_adj[df_adj["date"].isin(sel_dates)]
+
+            # ── Table ──────────────────────────────────────────────────────────
+            display_cols = [
+                "date", "tank_name", "system_name", "batch_name",
+                "expected_count", "actual_count", "variance", "variance_pct",
+                "note", "operator",
+            ]
+            present = [c for c in display_cols if c in df_adj.columns]
+            st.dataframe(
+                df_adj[present].sort_values("date", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            csv_adj = df_adj[present].to_csv(index=False)
+            st.download_button(
+                "Download CSV",
+                csv_adj,
+                file_name=f"count_adjustments_{date.today()}.csv",
+                mime="text/csv",
+                key="adj_download",
+            )
+
+            st.divider()
+            st.subheader("Delete adjustment record")
+
+            adj_options = []
+            adj_lookup  = {}
+            for adj in sorted(adjustments, key=lambda x: x.get("date", ""), reverse=True):
+                adj_id = adj.get("id")
+                if not adj_id:
+                    continue
+                e = adj.get("expected_count", 0)
+                a = adj.get("actual_count",  0)
+                v = adj.get("variance",       0)
+                label = (
+                    f"{adj.get('date', '—')} | "
+                    f"{adj.get('tank_name', '—')} | "
+                    f"expected {e:,} → actual {a:,} ({v:+,} fish)"
+                )
+                adj_options.append(label)
+                adj_lookup[label] = adj
+
+            if adj_options:
+                sel_adj_label = st.selectbox(
+                    "Select adjustment",
+                    adj_options,
+                    key="adj_delete_select",
+                )
+                sel_adj = adj_lookup[sel_adj_label]
+
+                if st.button("Delete adjustment", key="adj_delete_btn"):
+                    updated_adj = [a for a in adjustments if a.get("id") != sel_adj.get("id")]
+                    storage.save_adjustments(updated_adj)
+                    storage.log_activity(
+                        module="Movements",
+                        action="delete",
+                        summary=(
+                            f"Deleted count adjustment for "
+                            f"{sel_adj.get('tank_name', '—')}: "
+                            f"variance {sel_adj.get('variance', 0):+,}"
+                        ),
+                        date=sel_adj.get("date", ""),
+                        tank_name=sel_adj.get("tank_name", ""),
+                        details={"adjustment_id": sel_adj.get("id")},
+                    )
+                    st.success("Adjustment record deleted.")
+                    st.rerun()

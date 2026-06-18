@@ -217,12 +217,13 @@ def render() -> None:
 
     farm      = storage.load_farm()
     batches   = storage.load_batches()
-    logs      = storage.load_daily_logs()
-    movements = storage.load_movements()
+    logs        = storage.load_daily_logs()
+    movements   = storage.load_movements()
+    adjustments = storage.load_adjustments()
 
     today = date.today()
 
-    batch_summary = compute_batch_summary(farm, batches, logs, movements)
+    batch_summary = compute_batch_summary(farm, batches, logs, movements, adjustments=adjustments)
     summary_by_id = {s["batch_id"]: s for s in batch_summary}
 
     write_ok = can_write("Batch Management")   # False for Viewer
