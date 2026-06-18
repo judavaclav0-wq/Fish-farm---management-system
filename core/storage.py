@@ -587,6 +587,12 @@ def save_adjustments(records: list[dict]) -> None:
     save_jsonl("adjustments.jsonl", records)
 
 
+# alias used by some callers
+def add_adjustment(record: dict) -> None:
+    """Alias for append_adjustment — appends one record to adjustments.jsonl."""
+    append_adjustment(record)
+
+
 # ── Grading / histograms ──────────────────────────────────────────────────────
 
 def load_grading_logs() -> list[dict]:
