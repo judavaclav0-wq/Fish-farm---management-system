@@ -124,6 +124,32 @@ def _movement_quantity_fish(move: dict) -> int:
     return safe_int(move.get("quantity_fish", move.get("quantity")), 0)
 
 
+def normalize_empty_tank(tank: dict) -> dict:
+    """
+    Reset all stock-related fields on a tank dict when it holds no fish.
+
+    Works on both Farm-Setup tank dicts and computed state dicts.
+    Returns the same dict (mutated in place) for convenience.
+
+    Rules:
+      - fish_count <= 0  OR  biomass_kg <= 0  → tank is considered empty.
+      - Clears: fish_count, biomass_kg, avg_weight_g, density_kg_m3,
+                batch_id, batch_name, batch_composition.
+      - Does NOT clear tank identity fields (id, name, volume, etc.).
+    """
+    fish    = safe_float(tank.get("fish_count"), 0.0)
+    biomass = safe_float(tank.get("biomass_kg"), 0.0)
+    if fish <= 0 or biomass <= 0:
+        tank["fish_count"]        = 0
+        tank["biomass_kg"]        = 0.0
+        tank["avg_weight_g"]      = 0.0
+        tank["density_kg_m3"]     = 0.0
+        tank["batch_id"]          = None
+        tank["batch_name"]        = ""
+        tank["batch_composition"] = []
+    return tank
+
+
 def _filter_by_date(records: list[dict], as_of_date: str | None) -> list[dict]:
     if not as_of_date:
         return records
@@ -514,8 +540,6 @@ def compute_tank_state(
         harvest_ready_pct     = safe_float(latest_grading.get("harvest_ready_pct"), 0.0)
         small_threshold_g     = safe_float(latest_grading.get("small_threshold_g"), 0.0)
         harvest_threshold_g   = safe_float(latest_grading.get("harvest_threshold_g"), 0.0)
-        if grading_avg_weight_g is not None and grading_avg_weight_g > 0:
-            avg_weight_g = grading_avg_weight_g
 
     # ── Batch (legacy single-batch lookup) ────────────────────────────────
     batch = find_batch_for_tank(tank, batches)
@@ -570,37 +594,64 @@ def compute_tank_state(
     harvested_fish = sum(_movement_quantity_fish(m) for m in harvest_moves_out)
     transferred_out_fish = sum(_movement_quantity_fish(m) for m in transfer_moves_out)
 
-    # ── Weighted avg_weight from movements ────────────────────────────────
-    # Recalculate avg_weight_g as a biomass-weighted blend of the base stock
-    # and all incoming transfers.  Outflows and mortality are removed at the
-    # blended rate (proportional — they don't change the per-fish weight).
-    # Skipped when a grading-log measurement is available, which is always
-    # more accurate than the movement-derived estimate.
-    if not (grading_avg_weight_g is not None and grading_avg_weight_g > 0):
-        base_avg = safe_float(tank.get("avg_weight_g"), 0.0)
-        wt_biomass_g = float(base_fish_count) * base_avg
-        wt_fish      = float(base_fish_count)
+    # ── Weighted avg_weight from chronological events ─────────────────────
+    # Movements and grading logs are merged into one date-ordered stream.
+    # Grading logs act as in-situ calibration checkpoints: when encountered
+    # they update the per-fish weight estimate without changing fish count.
+    # Critically, they only take effect while the tank holds fish (wt_fish > 0),
+    # so a grading from a previous population does NOT contaminate the weight
+    # of fish that arrived after the tank was fully emptied and restocked.
+    base_avg     = safe_float(tank.get("avg_weight_g"), 0.0)
+    wt_biomass_g = float(base_fish_count) * base_avg
+    wt_fish      = float(base_fish_count)
 
-        for m in transfer_moves_in:
-            qty   = _movement_quantity_fish(m)
-            m_avg = safe_float(m.get("avg_weight_g"), 0.0)
+    all_events: list[tuple[str, str, str, dict]] = []
+    for m in transfer_moves_in:
+        all_events.append((m.get("date", ""), m.get("timestamp", m.get("time", "")), "in",    m))
+    for m in moves_out:
+        all_events.append((m.get("date", ""), m.get("timestamp", m.get("time", "")), "out",   m))
+    for g in tank_grading_logs:
+        if safe_float(g.get("avg_weight_g"), 0.0) > 0:
+            all_events.append((g.get("date", ""), "", "grade", g))
+    all_events.sort(key=lambda x: (x[0], x[1]))
+
+    for ev_date, ev_ts, direction, record in all_events:
+        if direction == "grade":
+            g_avg = safe_float(record.get("avg_weight_g"), 0.0)
+            if g_avg > 0 and wt_fish > 0:
+                # Calibrate the per-fish weight; fish count does not change.
+                wt_biomass_g = wt_fish * g_avg
+        elif direction == "in":
+            qty = _movement_quantity_fish(record)
+            if qty <= 0:
+                continue
+            m_avg = safe_float(record.get("avg_weight_g"), 0.0)
             if m_avg > 0:
-                wt_biomass_g += qty * m_avg
+                wt_biomass_g += float(qty) * m_avg
             else:
-                # No avg stored in movement: assume same weight as current blend
-                blend = wt_biomass_g / wt_fish if wt_fish > 0 else base_avg
-                wt_biomass_g += qty * blend
-            wt_fish += qty
+                # No avg stored: assume same weight as current blend.
+                blend = wt_biomass_g / wt_fish if wt_fish > 0 else 0.0
+                wt_biomass_g += float(qty) * blend
+            wt_fish += float(qty)
+        else:  # out (transfer out or harvest)
+            qty = _movement_quantity_fish(record)
+            if qty <= 0:
+                continue
+            if wt_fish > 0:
+                remove       = min(float(qty), wt_fish)
+                blend        = wt_biomass_g / wt_fish
+                wt_biomass_g = max(0.0, wt_biomass_g - remove * blend)
+                wt_fish      = max(0.0, wt_fish - remove)
 
-        # Remove outflows + mortality proportionally (no change to per-fish weight)
-        total_out_fish = float(moved_out_fish + total_mortality)
-        if wt_fish > 0 and total_out_fish > 0:
-            blend    = wt_biomass_g / wt_fish
-            remove   = min(total_out_fish, wt_fish)
-            wt_biomass_g = max(0.0, wt_biomass_g - remove * blend)
-            wt_fish      = max(0.0, wt_fish - remove)
+    # Mortality is proportional and doesn't change per-fish weight;
+    # applying it last (after all movements) is mathematically equivalent.
+    if wt_fish > 0 and total_mortality > 0:
+        remove       = min(float(total_mortality), wt_fish)
+        blend        = wt_biomass_g / wt_fish
+        wt_biomass_g = max(0.0, wt_biomass_g - remove * blend)
+        wt_fish      = max(0.0, wt_fish - remove)
 
-        avg_weight_g = round(wt_biomass_g / wt_fish, 1) if wt_fish > 0 else 0.0
+    avg_weight_g = round(wt_biomass_g / wt_fish, 1) if wt_fish > 0 else 0.0
 
     # ── Stock adjustments (count reconciliation) ─────────────────────────
     filtered_adj = _filter_by_date(adjustments or [], as_of_date)
@@ -617,6 +668,12 @@ def compute_tank_state(
         - total_mortality + total_adj_variance
     )
     current_fish_count = max(0, raw_fish_count)
+
+    # Empty-tank reset: when there are no fish, all per-fish metrics must be 0.
+    # This prevents stale Farm-Setup avg_weight_g or stock-adjustment divergence
+    # from leaving a non-zero avg_weight_g on a tank with fish_count == 0.
+    if current_fish_count == 0:
+        avg_weight_g = 0.0
 
     biomass = calculate_biomass_kg(current_fish_count, avg_weight_g)
     density = calculate_density_kg_m3(biomass, tank_volume_m3)
