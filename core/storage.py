@@ -717,6 +717,7 @@ def log_activity(
     append_activity_log(record)
 
 
+
 # ── Water consumption ─────────────────────────────────────────────────────────
 
 def load_water_consumption() -> list[dict]:
