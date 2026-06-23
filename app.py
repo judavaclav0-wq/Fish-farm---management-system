@@ -131,25 +131,27 @@ def _import(mod_name: str):
 
 # ── Page registry ─────────────────────────────────────────────────────────────
 PAGES: dict[str, str] = {
-    "Dashboard":        "dashboard",
-    "Farm Setup":       "farm_setup",
-    "Batch Management": "batches",
-    "Daily Log":        "daily_log",
-    "Movements":        "movements",
-    "Histograms":       "grading",
-    "Activity Log":     "activity_log",
-    "User Management":  "user_management",
+    "Dashboard":         "dashboard",
+    "Farm Setup":        "farm_setup",
+    "Batch Management":  "batches",
+    "Daily Log":         "daily_log",
+    "Movements":         "movements",
+    "Water Consumption": "water_consumption",
+    "Histograms":        "grading",
+    "Activity Log":      "activity_log",
+    "User Management":   "user_management",
 }
 
 PAGE_ICONS: dict[str, str] = {
-    "Dashboard":        "",
-    "Farm Setup":       "",
-    "Batch Management": "",
-    "Daily Log":        "",
-    "Movements":        "",
-    "Histograms":       "",
-    "Activity Log":     "",
-    "User Management":  "",
+    "Dashboard":         "",
+    "Farm Setup":        "",
+    "Batch Management":  "",
+    "Daily Log":         "",
+    "Movements":         "",
+    "Water Consumption": "",
+    "Histograms":        "",
+    "Activity Log":      "",
+    "User Management":   "",
 }
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────

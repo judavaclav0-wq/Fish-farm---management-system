@@ -262,6 +262,44 @@ def _sb_save_adjustments(records: list[dict]) -> None:
     _sb_replace("stock_adjustments", [_adj_row(r) for r in records])
 
 
+def _wc_row(r: dict) -> dict:
+    """Build a water_consumption table row from a reading record dict."""
+    return {
+        "id":                   r.get("id", new_id("wc_")),
+        "date":                 r.get("date", ""),
+        "time":                 r.get("time", ""),
+        "timestamp":            r.get("timestamp", ""),
+        "department":           r.get("department", ""),
+        "meter_m3":             r.get("meter_m3"),
+        "previous_meter_m3":    r.get("previous_meter_m3"),
+        "raw_consumption_m3":   r.get("raw_consumption_m3"),
+        "hours_since_previous": r.get("hours_since_previous"),
+        "m3_per_day":           r.get("m3_per_day"),
+        "payload":              r,
+        "created_at":           r.get("created_at", _now_iso()),
+        "updated_at":           _now_iso(),
+    }
+
+
+def _sb_load_water_consumption() -> list[dict]:
+    result = (
+        _sb()
+        .table("water_consumption")
+        .select("payload")
+        .order("timestamp")
+        .execute()
+    )
+    return [row["payload"] for row in (result.data or [])]
+
+
+def _sb_append_water_consumption(record: dict) -> None:
+    _sb().table("water_consumption").upsert(_wc_row(record)).execute()
+
+
+def _sb_save_water_consumption(records: list[dict]) -> None:
+    _sb_replace("water_consumption", [_wc_row(r) for r in records])
+
+
 def _sb_replace(table: str, rows: list[dict]) -> None:
     """Full-replacement upsert for any table that supports it.
 
@@ -677,6 +715,28 @@ def log_activity(
         "user_role":         current_user.get("role", ""),
     }
     append_activity_log(record)
+
+
+# ── Water consumption ─────────────────────────────────────────────────────────
+
+def load_water_consumption() -> list[dict]:
+    if _use_supabase():
+        return _sb_load_water_consumption()
+    return load_jsonl("water_consumption.jsonl")
+
+
+def append_water_consumption(record: dict) -> None:
+    if _use_supabase():
+        _sb_append_water_consumption(record)
+        return
+    append_jsonl("water_consumption.jsonl", record)
+
+
+def save_water_consumption(records: list[dict]) -> None:
+    if _use_supabase():
+        _sb_save_water_consumption(records)
+        return
+    save_jsonl("water_consumption.jsonl", records)
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────

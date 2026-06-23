@@ -37,26 +37,28 @@ ROLES = ["Admin", "Manager", "Operator", "Viewer"]
 
 # Pages visible to each role
 PAGE_ACCESS: dict[str, list[str]] = {
-    "Dashboard":        ["Admin", "Manager", "Operator", "Viewer"],
-    "Farm Setup":       ["Admin", "Manager"],
-    "Batch Management": ["Admin", "Manager", "Viewer"],
-    "Daily Log":        ["Admin", "Manager", "Operator"],
-    "Movements":        ["Admin", "Manager", "Operator"],
-    "Histograms":       ["Admin", "Manager", "Operator"],
-    "Activity Log":     ["Admin", "Manager"],
-    "User Management":  ["Admin"],
+    "Dashboard":         ["Admin", "Manager", "Operator", "Viewer"],
+    "Farm Setup":        ["Admin", "Manager"],
+    "Batch Management":  ["Admin", "Manager", "Viewer"],
+    "Daily Log":         ["Admin", "Manager", "Operator"],
+    "Movements":         ["Admin", "Manager", "Operator"],
+    "Water Consumption": ["Admin", "Manager", "Operator", "Viewer"],
+    "Histograms":        ["Admin", "Manager", "Operator"],
+    "Activity Log":      ["Admin", "Manager"],
+    "User Management":   ["Admin"],
 }
 
 # Pages where a role can make writes
 WRITE_ACCESS: dict[str, list[str]] = {
-    "Dashboard":        ["Admin", "Manager", "Operator"],
-    "Farm Setup":       ["Admin", "Manager"],
-    "Batch Management": ["Admin", "Manager"],
-    "Daily Log":        ["Admin", "Manager", "Operator"],
-    "Movements":        ["Admin", "Manager", "Operator"],
-    "Histograms":       ["Admin", "Manager", "Operator"],
-    "Activity Log":     ["Admin"],
-    "User Management":  ["Admin"],
+    "Dashboard":         ["Admin", "Manager", "Operator"],
+    "Farm Setup":        ["Admin", "Manager"],
+    "Batch Management":  ["Admin", "Manager"],
+    "Daily Log":         ["Admin", "Manager", "Operator"],
+    "Movements":         ["Admin", "Manager", "Operator"],
+    "Water Consumption": ["Admin", "Manager", "Operator"],
+    "Histograms":        ["Admin", "Manager", "Operator"],
+    "Activity Log":      ["Admin"],
+    "User Management":   ["Admin"],
 }
 
 
