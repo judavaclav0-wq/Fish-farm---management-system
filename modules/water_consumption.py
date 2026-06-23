@@ -19,6 +19,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 from core import storage
 from core.storage import new_id
+from core.auth import can_write
 
 DEPARTMENTS = ["Rafz 2", "Rafz 1", "Rafz 2 Fish"]
 
@@ -102,6 +103,10 @@ def _default_period(all_records: list[dict]) -> tuple[date, date]:
 # ---------------------------------------------------------------------------
 
 def _render_entry_form(all_records: list[dict]) -> None:
+    if not can_write("Water Consumption"):
+        st.error("Viewers have read-only access.")
+        return
+
     st.subheader("New Meter Reading")
 
     with st.form("wc_new_reading"):
@@ -564,6 +569,10 @@ def _render_pdf_section(all_records: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_delete(all_records: list[dict]) -> None:
+    if not can_write("Water Consumption"):
+        st.error("Viewers have read-only access.")
+        return
+
     st.subheader("Delete a Reading")
 
     if not all_records:
@@ -600,19 +609,24 @@ def render() -> None:
     st.title("Water Consumption")
 
     all_records = storage.load_water_consumption()
+    write_ok    = can_write("Water Consumption")
 
-    tab_entry, tab_overview, tab_history, tab_delete = st.tabs(
-        ["Record Reading", "Overview", "History", "Delete"]
-    )
-
-    with tab_entry:
-        _render_entry_form(all_records)
-
-    with tab_overview:
-        _render_overview(all_records)
-
-    with tab_history:
-        _render_history(all_records)
-
-    with tab_delete:
-        _render_delete(all_records)
+    if write_ok:
+        tab_entry, tab_overview, tab_history, tab_delete = st.tabs(
+            ["Record Reading", "Overview", "History", "Delete"]
+        )
+        with tab_entry:
+            _render_entry_form(all_records)
+        with tab_overview:
+            _render_overview(all_records)
+        with tab_history:
+            _render_history(all_records)
+        with tab_delete:
+            _render_delete(all_records)
+    else:
+        st.info("Read-only mode — viewing is enabled, data entry is restricted.", icon="ℹ️")
+        tab_overview, tab_history = st.tabs(["Overview", "History"])
+        with tab_overview:
+            _render_overview(all_records)
+        with tab_history:
+            _render_history(all_records)
