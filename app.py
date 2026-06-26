@@ -140,6 +140,7 @@ PAGES: dict[str, str] = {
     "Histograms":        "grading",
     "Activity Log":      "activity_log",
     "User Management":   "user_management",
+    "System Test / QA":  "system_qa",
 }
 
 PAGE_ICONS: dict[str, str] = {
@@ -152,6 +153,7 @@ PAGE_ICONS: dict[str, str] = {
     "Histograms":        "",
     "Activity Log":      "",
     "User Management":   "",
+    "System Test / QA":  "",
 }
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────

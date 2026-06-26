@@ -46,6 +46,7 @@ PAGE_ACCESS: dict[str, list[str]] = {
     "Histograms":        ["Admin", "Manager", "Operator"],
     "Activity Log":      ["Admin", "Manager"],
     "User Management":   ["Admin"],
+    "System Test / QA":  ["Admin"],
 }
 
 # Pages where a role can make writes
@@ -59,6 +60,7 @@ WRITE_ACCESS: dict[str, list[str]] = {
     "Histograms":        ["Admin", "Manager", "Operator"],
     "Activity Log":      ["Admin"],
     "User Management":   ["Admin"],
+    "System Test / QA":  ["Admin"],
 }
 
 
