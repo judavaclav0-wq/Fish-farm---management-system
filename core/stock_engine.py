@@ -112,6 +112,11 @@ def _movement_type(move: dict) -> str:
     "killing" maps to "harvest" so it reduces source stock without adding to a
     destination.  The raw stored value "killing" is what the dashboard uses to
     exclude killing records from the Harvest Overview.
+
+    "external_stock_in" maps to "transfer" so that compute_tank_state treats it
+    as a standard inbound transfer for the destination tank.  Because the record
+    has no from_tank_id the movement never appears as an outbound event for any
+    managed tank.
     """
     raw = str(move.get("movement_type", "transfer") or "transfer").strip().lower()
     if raw in {"harvest", "harvest / slaughter", "harvest/slaughter",
@@ -396,9 +401,18 @@ def _compute_all_batch_compositions(
             if qty <= 0:
                 continue
 
-            move_type = _movement_type(move)
-            from_id   = _resolve_tank(move, "from", tank_lookup)
+            move_type    = _movement_type(move)
+            raw_mv_type  = str(move.get("movement_type", "")).strip().lower()
+            from_id      = _resolve_tank(move, "from", tank_lookup)
+
             if not from_id:
+                # External Stock In has no source tank — add directly to destination.
+                if raw_mv_type == "external_stock_in":
+                    to_id = _resolve_tank(move, "to", tank_lookup)
+                    if to_id:
+                        bid       = move.get("batch_id") or ""
+                        dest_comp = state.setdefault(to_id, {})
+                        dest_comp[bid] = dest_comp.get(bid, 0) + qty
                 continue
 
             from_comp  = state.get(from_id, {})

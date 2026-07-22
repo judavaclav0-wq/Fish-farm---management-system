@@ -292,3 +292,137 @@ class TestNegativeStockPrevention:
         # A warning should be present about the negative raw count
         assert any("below zero" in w.lower() or "check" in w.lower()
                    for w in result.get("warnings", []))
+
+
+# ── External Stock In ─────────────────────────────────────────────────────────
+
+def make_external_stock_in(
+    to_tank_id: str,
+    batch_id: str,
+    qty: int,
+    avg_weight_g: float,
+    date: str = "2026-01-02",
+) -> dict:
+    """Create an External Stock In movement record (no source tank)."""
+    return {
+        "id":             "mv_ext",
+        "date":           date,
+        "movement_type":  "external_stock_in",
+        "from_tank_id":   "",
+        "from_tank_name": "",
+        "to_tank_id":     to_tank_id,
+        "to_tank_name":   f"QA-{to_tank_id}",
+        "quantity_fish":  qty,
+        "avg_weight_g":   avg_weight_g,
+        "batch_id":       batch_id,
+        "external_source": "Test hatchery",
+    }
+
+
+class TestExternalStockIn:
+    """
+    External Stock In: fish arrive from outside the managed farm.
+    No source tank is involved — only destination stock changes.
+    """
+
+    # Test 1: import into empty tank
+    def test_empty_tank_fish_count(self):
+        tank      = make_tank("t1", fish_count=0, avg_weight_g=0.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 150.0)]
+        result    = state(tank, movements=movements)
+        assert result["fish_count"] == 100
+
+    def test_empty_tank_avg_weight(self):
+        tank      = make_tank("t1", fish_count=0, avg_weight_g=0.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 150.0)]
+        result    = state(tank, movements=movements)
+        assert approx(result["avg_weight_g"], 150.0)
+
+    def test_empty_tank_biomass(self):
+        tank      = make_tank("t1", fish_count=0, avg_weight_g=0.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 150.0)]
+        result    = state(tank, movements=movements)
+        # 100 * 150 / 1000 = 15.0 kg
+        assert approx(result["biomass_kg"], 15.0)
+
+    def test_empty_tank_stale_weight_not_contaminated(self):
+        # Tank has stale avg_weight from old data; import should win.
+        tank          = make_tank("t1", fish_count=0, avg_weight_g=169.0)
+        movements     = [make_external_stock_in("t1", "batch_A", 100, 150.0)]
+        result        = state(tank, movements=movements)
+        assert approx(result["avg_weight_g"], 150.0), (
+            f"Stale 169.0 contaminated result; got {result['avg_weight_g']}"
+        )
+
+    # Test 2: import into occupied tank
+    def test_occupied_tank_fish_count(self):
+        # Existing: 100 @ 100 g. Import: 100 @ 200 g.
+        tank      = make_tank("t1", fish_count=100, avg_weight_g=100.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 200.0)]
+        result    = state(tank, movements=movements)
+        assert result["fish_count"] == 200
+
+    def test_occupied_tank_biomass(self):
+        # biomass = (100*100 + 100*200) / 1000 = 30 kg
+        tank      = make_tank("t1", fish_count=100, avg_weight_g=100.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 200.0)]
+        result    = state(tank, movements=movements)
+        assert approx(result["biomass_kg"], 30.0, tol=0.1)
+
+    def test_occupied_tank_weighted_avg(self):
+        # (100*100 + 100*200) / 200 = 150 g
+        tank      = make_tank("t1", fish_count=100, avg_weight_g=100.0)
+        movements = [make_external_stock_in("t1", "batch_A", 100, 200.0)]
+        result    = state(tank, movements=movements)
+        assert approx(result["avg_weight_g"], 150.0, tol=0.2)
+
+    # No source tank is ever modified
+    def test_no_source_tank_modified(self):
+        """The movement must not reduce stock from any managed tank."""
+        src  = make_tank("t_src",  fish_count=500, avg_weight_g=100.0)
+        dest = make_tank("t_dest", fish_count=0,   avg_weight_g=0.0)
+        m    = make_external_stock_in("t_dest", "batch_A", 100, 150.0)
+
+        # Source tank sees the same movement — it must be untouched.
+        s_src  = state(src,  movements=[m])
+        s_dest = state(dest, movements=[m])
+
+        assert s_src["fish_count"] == 500, "Source tank must not lose fish"
+        assert s_dest["fish_count"] == 100
+
+    # Test 7: movement record fields (integration check at engine level)
+    def test_movement_type_treated_as_transfer_in(self):
+        """engine treats external_stock_in as inbound transfer for dest tank."""
+        tank      = make_tank("t1", fish_count=0, avg_weight_g=0.0)
+        movements = [make_external_stock_in("t1", "batch_A", 200, 80.0)]
+        result    = state(tank, movements=movements)
+        assert result["fish_count"] == 200
+
+    # Test 6: invalid inputs (pure Python validation — engine level)
+    def test_zero_fish_produces_no_stock(self):
+        """A zero-quantity External Stock In must not change the destination."""
+        tank      = make_tank("t1", fish_count=50, avg_weight_g=100.0)
+        m         = make_external_stock_in("t1", "batch_A", 0, 100.0)
+        result    = state(tank, movements=[m])
+        assert result["fish_count"] == 50  # unchanged
+
+    # Test 8: existing movement types regression
+    def test_transfer_still_works_alongside_external(self):
+        """Regular transfers must not be affected by External Stock In records."""
+        tank      = make_tank("t1", fish_count=200, avg_weight_g=100.0)
+        movements = [
+            make_external_stock_in("t1", "batch_A", 100, 150.0, date="2026-01-01"),
+            make_transfer("t1", "t2", qty=50, date="2026-01-02"),
+        ]
+        result = state(tank, movements=movements)
+        # 200 (setup) + 100 (external in) - 50 (transfer out) = 250
+        assert result["fish_count"] == 250
+
+    def test_harvest_still_works_alongside_external(self):
+        tank      = make_tank("t1", fish_count=100, avg_weight_g=100.0)
+        movements = [
+            make_external_stock_in("t1", "batch_A", 100, 150.0, date="2026-01-01"),
+            make_harvest("t1", qty=200, date="2026-01-02"),
+        ]
+        result = state(tank, movements=movements)
+        assert result["fish_count"] == 0
