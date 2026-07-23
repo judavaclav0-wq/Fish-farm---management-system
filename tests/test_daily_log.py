@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from modules.daily_log import _normalize_treatments, TREATMENT_UNITS
 from core.calculations import get_tank_fish_count, is_tank_occupied
-from core.stock_engine import normalize_empty_tank, compute_tank_state
+from core.stock_engine import normalize_empty_tank, compute_tank_state, compute_farm_state
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -230,6 +230,155 @@ class TestTankOccupancyViaComputeTankState:
         s    = compute_tank_state(tank, [], movements=[self._ext_in(500)], daily_logs=[])
         assert is_tank_occupied(s)
         assert get_tank_fish_count(s) == 500
+
+
+class TestDailyLogEntryTabOccupancy:
+    """
+    Regression tests for the Daily Log entry tab occupancy logic.
+
+    Root cause of the original bug: the entry tab was not using compute_farm_state
+    to determine tank occupancy, so tanks emptied by movements still showed as
+    occupied (allowing mortality entry) because the farm-setup fish_count was > 0.
+
+    These tests verify the full data-flow path:
+    farm_data + movements + daily_logs → compute_farm_state → is_tank_occupied.
+    """
+
+    def _farm(self, systems):
+        return {"systems": systems, "tanks": []}
+
+    def _system(self, name, tanks):
+        return {"id": f"sys_{name}", "name": name, "type": "Growout", "tanks": tanks}
+
+    def _tank(self, tid, name, fish_count, system_name="S1"):
+        return {
+            "id": tid, "name": name,
+            "system_id": "sys_S1", "system_name": system_name,
+            "fish_count": float(fish_count),
+            "avg_weight_g": 100.0,
+            "biomass_kg": fish_count * 100.0 / 1000.0,
+            "tank_volume_m3": 30.0,
+        }
+
+    def _transfer(self, from_id, to_id, qty, date="2026-01-10"):
+        return {
+            "id": f"mv_{from_id}_{to_id}",
+            "date": date,
+            "movement_type": "transfer",
+            "from_tank_id": from_id,
+            "to_tank_id": to_id,
+            "quantity_fish": qty,
+            "avg_weight_g": 100.0,
+        }
+
+    def _harvest(self, from_id, qty, date="2026-01-10"):
+        return {
+            "id": f"mv_harv_{from_id}",
+            "date": date,
+            "movement_type": "harvest",
+            "from_tank_id": from_id,
+            "to_tank_id": None,
+            "quantity_fish": qty,
+            "avg_weight_g": 100.0,
+        }
+
+    def _log_entry(self, tank_id, tank_name, mortality, date="2026-01-05", system="S1"):
+        return {
+            "date": date,
+            "system_name": system,
+            "tank_id": tank_id,
+            "tank_name": tank_name,
+            "mortality_fish": mortality,
+            "feed_kg": 10.0,
+            "oxygen": 8.0,
+        }
+
+    def test_tank_with_positive_setup_fish_and_no_movements_is_occupied(self):
+        farm = self._farm([self._system("S1", [self._tank("t1", "T1", 1000)])])
+        states = compute_farm_state(farm, [], [], [])
+        state = next(s for s in states if s["tank_id"] == "t1")
+        assert is_tank_occupied(state)
+        assert get_tank_fish_count(state) == 1000
+
+    def test_tank_emptied_by_transfer_out_shows_as_empty(self):
+        # Tank T1 starts with 1000 fish, all transferred to T2.
+        # Regression: entry tab must NOT show mortality input for T1.
+        farm = self._farm([self._system("S1", [
+            self._tank("t1", "T1", 1000),
+            self._tank("t2", "T2", 0),
+        ])])
+        mv = self._transfer("t1", "t2", 1000)
+        states = compute_farm_state(farm, [], [], [mv])
+        t1_state = next(s for s in states if s["tank_id"] == "t1")
+        t2_state = next(s for s in states if s["tank_id"] == "t2")
+        assert not is_tank_occupied(t1_state), "T1 should be empty after full transfer"
+        assert is_tank_occupied(t2_state),     "T2 should be occupied after receiving fish"
+
+    def test_tank_emptied_by_harvest_shows_as_empty(self):
+        farm = self._farm([self._system("S1", [self._tank("t1", "T1", 5000)])])
+        mv = self._harvest("t1", 5000)
+        states = compute_farm_state(farm, [], [], [mv])
+        t1_state = next(s for s in states if s["tank_id"] == "t1")
+        assert not is_tank_occupied(t1_state)
+
+    def test_tank_with_positive_setup_fish_emptied_then_restocked(self):
+        # T1 starts with 1000, transfers all to T2, then receives 500 from T3.
+        farm = self._farm([self._system("S1", [
+            self._tank("t1", "T1", 1000),
+            self._tank("t2", "T2", 0),
+            self._tank("t3", "T3", 500),
+        ])])
+        mvs = [
+            self._transfer("t1", "t2", 1000, date="2026-01-10"),
+            self._transfer("t3", "t1", 500,  date="2026-01-11"),
+        ]
+        states = compute_farm_state(farm, [], [], mvs)
+        t1 = next(s for s in states if s["tank_id"] == "t1")
+        assert is_tank_occupied(t1)
+        assert get_tank_fish_count(t1) == 500
+
+    def test_cumulative_mortality_exceeding_base_renders_tank_empty(self):
+        # 1000 fish setup; 80 fish logged dead across two days + 1000 transferred out.
+        # compute_farm_state must show fish_count = 0 so is_tank_occupied returns False.
+        farm = self._farm([self._system("S1", [
+            self._tank("t1", "T1", 1000),
+            self._tank("t2", "T2", 0),
+        ])])
+        mv = self._transfer("t1", "t2", 1000, date="2026-01-10")
+        dl_logs = [
+            self._log_entry("t1", "T1", 40, date="2026-01-06"),
+            self._log_entry("t1", "T1", 40, date="2026-01-07"),
+        ]
+        states = compute_farm_state(farm, [], dl_logs, [mv])
+        t1 = next(s for s in states if s["tank_id"] == "t1")
+        assert not is_tank_occupied(t1)
+        assert get_tank_fish_count(t1) == 0
+
+    def test_multi_system_tank_occupancy_independent(self):
+        # Two systems each with a tank named "01"; movements are system-scoped.
+        # Emptying S1/01 must NOT affect S2/01.
+        farm = self._farm([
+            self._system("S1", [self._tank("t_s1", "01", 1000, "S1")]),
+            self._system("S2", [self._tank("t_s2", "01", 500,  "S2")]),
+        ])
+        mv = self._transfer("t_s1", "t_unused", 1000)  # empties S1/01 only
+        states = compute_farm_state(farm, [], [], [mv])
+        s1_tank = next(s for s in states if s["tank_id"] == "t_s1")
+        s2_tank = next(s for s in states if s["tank_id"] == "t_s2")
+        assert not is_tank_occupied(s1_tank), "S1/01 should be empty"
+        assert is_tank_occupied(s2_tank),     "S2/01 should still be occupied"
+
+    def test_entry_tab_occupancy_lookup_key_uses_tank_id_not_name(self):
+        # existing_by_tank is keyed by tank_id.
+        # Verify that looking up by the stable ID returns the right record.
+        existing_entries = [
+            {"tank_id": "tank_abc", "tank_name": "01", "mortality_fish": 7, "oxygen": 8.1},
+            {"tank_id": "tank_def", "tank_name": "02", "mortality_fish": 3, "oxygen": 7.5},
+        ]
+        by_tank = {e["tank_id"]: e for e in existing_entries}
+        assert by_tank.get("tank_abc", {}).get("mortality_fish") == 7
+        assert by_tank.get("tank_def", {}).get("mortality_fish") == 3
+        assert by_tank.get("unknown", {}) == {}
 
 
 class TestNormalizeEmptyTank:

@@ -332,6 +332,33 @@ def render() -> None:
 
         st.divider()
 
+        # ── DEBUG: per-tank diagnostic expander (temporary — remove before release) ──
+        with st.expander("🔍 Debug: tank occupancy diagnostics", expanded=False):
+            sys_obj = next(
+                (s for s in farm.get("systems", []) if s.get("name") == selected_system), {}
+            )
+            st.write(f"**System:** {selected_system}  |  ID: `{sys_obj.get('id', '—')}`")
+            debug_rows = []
+            for s in visible_tanks:
+                tid      = s["tank_id"]
+                ex       = existing_by_tank.get(tid, {})
+                occupied = is_tank_occupied(s)
+                debug_rows.append({
+                    "tank_name":       s.get("tank_name", "—"),
+                    "tank_id":         tid,
+                    "base_fish":       s.get("base_fish_count", "?"),
+                    "moved_in":        s.get("moved_in_fish", 0),
+                    "moved_out":       s.get("moved_out_fish", 0),
+                    "mortality":       s.get("total_mortality", 0),
+                    "fish_count":      s.get("fish_count", 0),
+                    "is_occupied":     occupied,
+                    "ex_mortality":    ex.get("mortality_fish", "—"),
+                    "o2_key":          f"o2_{tid}_{log_date_str}",
+                    "mort_key":        f"mort_{tid}_{log_date_str}",
+                    "mort_enabled":    occupied,
+                })
+            st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
+
         # ── Per-tank entries ───────────────────────────────────────────────
         tank_entries = []
 
