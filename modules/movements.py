@@ -10,6 +10,42 @@ from core import storage
 from core.stock_engine import get_all_tanks, compute_tank_state
 
 
+def _update_farm_state_for_movement(
+    record: dict,
+    adjustment_variance: int = 0,
+) -> None:
+    """Atomically update farm_state fish_counts after a movement is saved.
+
+    For Transfer: subtract quantity from source, add to destination.
+    For Harvest/Killing: subtract quantity from source.
+    For External Stock In: add quantity to destination.
+    Count-reconciliation variance (adjustment) is applied to the source
+    tank before the transfer quantity is subtracted, mirroring the UI
+    intent: 'we counted X, then moved Y'.
+    """
+    farm = storage.load_farm()
+    qty  = int(record.get("quantity_fish", 0))
+    mtype = record.get("movement_type", "")
+
+    from_id = record.get("from_tank_id")
+    to_id   = record.get("to_tank_id")
+
+    for system in farm.get("systems", []):
+        for tank in system.get("tanks", []):
+            tid = tank.get("id")
+            current = max(0.0, float(tank.get("fish_count", 0)))
+
+            if tid == from_id:
+                # Apply count reconciliation (pre-transfer actual count) first.
+                adjusted = current + adjustment_variance
+                tank["fish_count"] = max(0.0, adjusted - qty)
+
+            elif tid == to_id and mtype in ("transfer", "external_stock_in"):
+                tank["fish_count"] = current + qty
+
+    storage.save_farm(farm)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 def render() -> None:
     st.header("Fish Movements")
@@ -174,6 +210,7 @@ def render() -> None:
                             }
 
                             storage.append_movement(record)
+                            _update_farm_state_for_movement(record)
 
                             # Update batch initial_fish_count so mortality % is correct.
                             # We add the imported quantity to whatever baseline already exists.
@@ -421,6 +458,10 @@ def render() -> None:
                     }
 
                     storage.append_movement(record)
+                    _update_farm_state_for_movement(
+                        record,
+                        adjustment_variance=adjustment_variance if has_adjustment else 0,
+                    )
 
                     # Save count-reconciliation adjustment if checkbox was used
                     if has_adjustment and adjustment_variance != 0:

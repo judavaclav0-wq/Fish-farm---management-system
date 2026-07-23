@@ -175,6 +175,11 @@ class TestIsTankOccupied:
 
 
 class TestTankOccupancyViaComputeTankState:
+    """
+    compute_tank_state reads fish_count DIRECTLY from farm_state (the
+    materialized current value).  Movement records are passed for historical
+    totals (total_moved_in, total_moved_out) but must NOT alter fish_count.
+    """
 
     def _mk_tank(self, fish_count, avg_weight_g=100.0):
         return {
@@ -206,7 +211,7 @@ class TestTankOccupancyViaComputeTankState:
             "batch_id": "b1",
         }
 
-    # Test 6: occupied tank allows mortality (fish_count > 0 in compute result)
+    # Test 6: occupied tank allows mortality (fish_count > 0 in farm_state)
     def test_occupied_tank_has_positive_fish_count(self):
         tank = self._mk_tank(1000, avg_weight_g=100.0)
         s    = compute_tank_state(tank, [], movements=[], daily_logs=[])
@@ -218,30 +223,42 @@ class TestTankOccupancyViaComputeTankState:
         s    = compute_tank_state(tank, [], movements=[], daily_logs=[])
         assert not is_tank_occupied(s)
 
-    # Test 8: tank becomes empty after transfer-all-out
+    # Test 8: After a transfer-out the movement updates farm_state; compute_tank_state
+    # reads the updated farm_state (fish_count=0) directly.  The movement record is
+    # audit history and its quantity is returned as total moved_out — not subtracted again.
     def test_transfer_all_fish_out_yields_empty(self):
-        tank = self._mk_tank(1000)
-        s    = compute_tank_state(tank, [], movements=[self._transfer_out(1000)], daily_logs=[])
+        tank = self._mk_tank(0)        # farm_state already updated by the movement
+        mv   = self._transfer_out(1000)
+        s    = compute_tank_state(tank, [], movements=[mv], daily_logs=[])
         assert not is_tank_occupied(s)
+        assert s["moved_out_fish"] == 1000  # informational total
 
-    # Test 9: External Stock In changes tank from empty to occupied
+    # Test 9: After External Stock In the movement updates farm_state; compute_tank_state
+    # reads the updated farm_state (fish_count=500) directly.
     def test_ext_in_makes_empty_tank_occupied(self):
-        tank = self._mk_tank(0)
-        s    = compute_tank_state(tank, [], movements=[self._ext_in(500)], daily_logs=[])
+        tank = self._mk_tank(500)      # farm_state already updated by the movement
+        mv   = self._ext_in(500)
+        s    = compute_tank_state(tank, [], movements=[mv], daily_logs=[])
         assert is_tank_occupied(s)
         assert get_tank_fish_count(s) == 500
+        assert s["moved_in_fish"] == 500   # informational total
 
 
 class TestDailyLogEntryTabOccupancy:
     """
     Regression tests for the Daily Log entry tab occupancy logic.
 
-    Root cause of the original bug: the entry tab was not using compute_farm_state
-    to determine tank occupancy, so tanks emptied by movements still showed as
-    occupied (allowing mortality entry) because the farm-setup fish_count was > 0.
+    Architecture (materialized-state model):
+    - farm_state.fish_count IS the live current count, updated atomically by
+      every operation (movements via _update_farm_state_for_movement, mortality
+      via _apply_mortality_to_farm).
+    - compute_farm_state reads fish_count directly from farm_state.
+    - Movement and mortality records in history are informational totals only —
+      they are NOT replayed on top of farm_state to derive fish_count.
 
-    These tests verify the full data-flow path:
-    farm_data + movements + daily_logs → compute_farm_state → is_tank_occupied.
+    Each test sets up farm_state with the fish_count value that reflects the
+    materialized outcome of the scenario (i.e. as if movements already updated
+    farm_state), then verifies compute_farm_state + is_tank_occupied agree.
     """
 
     def _farm(self, systems):
@@ -301,32 +318,37 @@ class TestDailyLogEntryTabOccupancy:
         assert get_tank_fish_count(state) == 1000
 
     def test_tank_emptied_by_transfer_out_shows_as_empty(self):
-        # Tank T1 starts with 1000 fish, all transferred to T2.
-        # Regression: entry tab must NOT show mortality input for T1.
+        # After the transfer farm_state was updated: T1→0, T2→1000.
+        # Movement record is still passed for historical totals.
         farm = self._farm([self._system("S1", [
-            self._tank("t1", "T1", 1000),
-            self._tank("t2", "T2", 0),
+            self._tank("t1", "T1", 0),     # farm_state updated by movement
+            self._tank("t2", "T2", 1000),  # farm_state updated by movement
         ])])
         mv = self._transfer("t1", "t2", 1000)
         states = compute_farm_state(farm, [], [], [mv])
         t1_state = next(s for s in states if s["tank_id"] == "t1")
         t2_state = next(s for s in states if s["tank_id"] == "t2")
-        assert not is_tank_occupied(t1_state), "T1 should be empty after full transfer"
-        assert is_tank_occupied(t2_state),     "T2 should be occupied after receiving fish"
+        assert not is_tank_occupied(t1_state), "T1 should be empty — farm_state reflects transfer"
+        assert is_tank_occupied(t2_state),     "T2 should be occupied — farm_state reflects transfer"
+        assert t1_state["moved_out_fish"] == 1000  # informational history total
+        assert t2_state["moved_in_fish"]  == 1000  # informational history total
 
     def test_tank_emptied_by_harvest_shows_as_empty(self):
-        farm = self._farm([self._system("S1", [self._tank("t1", "T1", 5000)])])
+        # After the harvest farm_state was updated: T1→0.
+        farm = self._farm([self._system("S1", [self._tank("t1", "T1", 0)])])
         mv = self._harvest("t1", 5000)
         states = compute_farm_state(farm, [], [], [mv])
         t1_state = next(s for s in states if s["tank_id"] == "t1")
         assert not is_tank_occupied(t1_state)
+        assert t1_state["moved_out_fish"] == 5000  # informational total
 
     def test_tank_with_positive_setup_fish_emptied_then_restocked(self):
-        # T1 starts with 1000, transfers all to T2, then receives 500 from T3.
+        # T1: 1000 transferred out, 500 transferred in → net farm_state = 500.
+        # T2: received 1000 → farm_state = 1000. T3: sent 500 → farm_state = 0.
         farm = self._farm([self._system("S1", [
-            self._tank("t1", "T1", 1000),
-            self._tank("t2", "T2", 0),
-            self._tank("t3", "T3", 500),
+            self._tank("t1", "T1", 500),   # farm_state after both movements
+            self._tank("t2", "T2", 1000),
+            self._tank("t3", "T3", 0),
         ])])
         mvs = [
             self._transfer("t1", "t2", 1000, date="2026-01-10"),
@@ -338,13 +360,14 @@ class TestDailyLogEntryTabOccupancy:
         assert get_tank_fish_count(t1) == 500
 
     def test_cumulative_mortality_exceeding_base_renders_tank_empty(self):
-        # 1000 fish setup; 80 fish logged dead across two days + 1000 transferred out.
-        # compute_farm_state must show fish_count = 0 so is_tank_occupied returns False.
+        # Mortality (80 fish) updated farm_state: 1000→920.
+        # Transfer of 920 out updated farm_state: 920→0.
+        # Final farm_state: T1=0, T2=920.
         farm = self._farm([self._system("S1", [
-            self._tank("t1", "T1", 1000),
-            self._tank("t2", "T2", 0),
+            self._tank("t1", "T1", 0),    # farm_state after mortality + transfer
+            self._tank("t2", "T2", 920),  # farm_state after receiving transfer
         ])])
-        mv = self._transfer("t1", "t2", 1000, date="2026-01-10")
+        mv = self._transfer("t1", "t2", 920, date="2026-01-10")
         dl_logs = [
             self._log_entry("t1", "T1", 40, date="2026-01-06"),
             self._log_entry("t1", "T1", 40, date="2026-01-07"),
@@ -353,15 +376,16 @@ class TestDailyLogEntryTabOccupancy:
         t1 = next(s for s in states if s["tank_id"] == "t1")
         assert not is_tank_occupied(t1)
         assert get_tank_fish_count(t1) == 0
+        assert t1["total_mortality"] == 80  # informational total
 
     def test_multi_system_tank_occupancy_independent(self):
-        # Two systems each with a tank named "01"; movements are system-scoped.
-        # Emptying S1/01 must NOT affect S2/01.
+        # Two systems each with a tank named "01". Transfer empties S1/01 only.
+        # farm_state updated for S1/01 (→0); S2/01 unchanged (500).
         farm = self._farm([
-            self._system("S1", [self._tank("t_s1", "01", 1000, "S1")]),
-            self._system("S2", [self._tank("t_s2", "01", 500,  "S2")]),
+            self._system("S1", [self._tank("t_s1", "01", 0,   "S1")]),
+            self._system("S2", [self._tank("t_s2", "01", 500, "S2")]),
         ])
-        mv = self._transfer("t_s1", "t_unused", 1000)  # empties S1/01 only
+        mv = self._transfer("t_s1", "t_unused", 1000)
         states = compute_farm_state(farm, [], [], [mv])
         s1_tank = next(s for s in states if s["tank_id"] == "t_s1")
         s2_tank = next(s for s in states if s["tank_id"] == "t_s2")
@@ -412,3 +436,220 @@ class TestNormalizeEmptyTank:
         result = normalize_empty_tank(tank)
         assert result["fish_count"] == 1000
         assert result["biomass_kg"] == 150.0
+
+
+# ── Regression: farm_state materialization (9 canonical scenarios) ────────────
+
+class TestFarmStateMaterialization:
+    """
+    Regression tests for the materialized-state architecture.
+
+    Rule: farm_state.fish_count IS the single source of truth for current stock.
+    Movement, mortality, and adjustment records are audit history — they supply
+    informational totals (total_moved_in etc.) but NEVER alter fish_count.
+    """
+
+    def _farm_with_tank(self, tid, fish_count, avg_weight_g=100.0):
+        tank = {
+            "id": tid, "name": f"Tank_{tid}",
+            "system_id": "sys_A", "system_name": "A",
+            "fish_count": float(fish_count),
+            "avg_weight_g": avg_weight_g,
+            "biomass_kg": round(fish_count * avg_weight_g / 1000.0, 3),
+            "tank_volume_m3": 50.0,
+        }
+        return {
+            "systems": [{"id": "sys_A", "name": "A", "type": "Growout", "tanks": [tank]}],
+            "tanks": [],
+        }
+
+    def _mv_in(self, tid, qty, mid="mv_in"):
+        return {
+            "id": mid, "date": "2026-01-01",
+            "movement_type": "external_stock_in",
+            "from_tank_id": "", "to_tank_id": tid,
+            "quantity_fish": qty, "avg_weight_g": 0.0,
+        }
+
+    def _mv_out(self, tid, qty, mid="mv_out"):
+        return {
+            "id": mid, "date": "2026-01-02",
+            "movement_type": "transfer",
+            "from_tank_id": tid, "to_tank_id": "other",
+            "quantity_fish": qty, "avg_weight_g": 0.0,
+        }
+
+    def _mortality_log(self, tid, mort, date="2026-01-03"):
+        return {
+            "date": date, "system_name": "A",
+            "tank_id": tid, "tank_name": f"Tank_{tid}",
+            "mortality_fish": mort, "feed_kg": 0.0, "oxygen": 0.0,
+        }
+
+    def _adj(self, tid, variance):
+        return {
+            "id": "adj1", "date": "2026-01-01",
+            "tank_id": tid, "variance": variance,
+        }
+
+    # ── Test 1 ────────────────────────────────────────────────────────────────
+    def test_materialized_fish_count_takes_precedence_over_history_replay(self):
+        """
+        farm_state has fish_count=1346. Movement history, if replayed, would
+        give a different number. The live result must be 1346.
+        """
+        farm = self._farm_with_tank("t1", fish_count=1346)
+        # History: +1346 in, -2194 out → replay would give 1346 + 1346 - 2194 = 498.
+        mvs = [
+            self._mv_in("t1", 1346, "mv_in"),
+            self._mv_out("t1", 2194, "mv_out"),
+        ]
+        states = compute_farm_state(farm, [], [], mvs)
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 1346, (
+            "fish_count must come from farm_state, not from replaying movements"
+        )
+
+    # ── Test 2 ────────────────────────────────────────────────────────────────
+    def test_empty_farm_state_is_empty_even_when_history_implies_stock(self):
+        """
+        farm_state has fish_count=0. Movement history implies a stocked tank.
+        The live result must be 0 (empty).
+        """
+        farm = self._farm_with_tank("t1", fish_count=0)
+        mvs  = [self._mv_in("t1", 5000)]   # history shows 5000 came in
+        states = compute_farm_state(farm, [], [], mvs)
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 0
+        assert not is_tank_occupied(s)
+
+    # ── Test 3 ────────────────────────────────────────────────────────────────
+    def test_movement_history_totals_still_reported_as_informational_fields(self):
+        """
+        Movement records supply informational totals (moved_in_fish,
+        moved_out_fish) without altering fish_count.
+        """
+        farm = self._farm_with_tank("t1", fish_count=800)
+        mvs  = [self._mv_in("t1", 1000, "in"), self._mv_out("t1", 200, "out")]
+        states = compute_farm_state(farm, [], [], mvs)
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert s["moved_in_fish"]  == 1000
+        assert s["moved_out_fish"] == 200
+        assert get_tank_fish_count(s) == 800   # farm_state, not 800+1000-200=1600
+
+    # ── Test 4 ────────────────────────────────────────────────────────────────
+    def test_mortality_not_subtracted_twice(self):
+        """
+        When mortality is logged, _apply_mortality_to_farm updates farm_state
+        immediately. compute_farm_state reads fish_count from farm_state and must
+        NOT subtract mortality again.
+
+        Scenario: setup 1000, 80 logged dead → farm_state updated to 920.
+        compute_farm_state must return 920, not 920 - 80 = 840.
+        """
+        farm = self._farm_with_tank("t1", fish_count=920)  # farm_state post-mortality
+        dl   = [self._mortality_log("t1", 80)]
+        states = compute_farm_state(farm, [], dl, [])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 920, (
+            "mortality must not be subtracted from the already-updated farm_state"
+        )
+        assert s["total_mortality"] == 80  # informational
+
+    # ── Test 5 ────────────────────────────────────────────────────────────────
+    def test_dashboard_and_daily_log_same_source(self):
+        """
+        Both the Dashboard and Daily Log call compute_farm_state, which now
+        reads farm_state fish_count directly. Given identical farm_state, they
+        must produce the same fish_count regardless of movement or adjustment
+        records passed.
+        """
+        farm = self._farm_with_tank("t1", fish_count=1346)
+        adj  = [self._adj("t1", 1363)]
+        mvs  = [self._mv_out("t1", 1000)]
+
+        # "Dashboard" path: includes adjustments
+        dashboard_states = compute_farm_state(farm, [], [], mvs, adjustments=adj)
+        # "Daily Log" path: now also includes adjustments (the bug fix)
+        daily_log_states = compute_farm_state(farm, [], [], mvs, adjustments=adj)
+
+        d = next(st for st in dashboard_states if st["tank_id"] == "t1")
+        l = next(st for st in daily_log_states  if st["tank_id"] == "t1")
+        assert get_tank_fish_count(d) == get_tank_fish_count(l) == 1346
+
+    # ── Test 6 ────────────────────────────────────────────────────────────────
+    def test_transfer_quantity_not_double_applied(self):
+        """
+        A transfer updates farm_state once (via _update_farm_state_for_movement).
+        Subsequent compute_farm_state calls must not apply the transfer again.
+        """
+        farm = self._farm_with_tank("t1", fish_count=700)  # farm_state after 300 out
+        mv   = self._mv_out("t1", 300)
+        states = compute_farm_state(farm, [], [], [mv])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 700, (
+            "transfer quantity must not reduce fish_count again in compute_farm_state"
+        )
+
+    # ── Test 7 ────────────────────────────────────────────────────────────────
+    def test_external_stock_in_not_double_counted(self):
+        """
+        External Stock In updates farm_state once. Subsequent compute_farm_state
+        must not add the quantity again.
+        """
+        farm = self._farm_with_tank("t1", fish_count=1500)  # farm_state after +500 in
+        mv   = self._mv_in("t1", 500)
+        states = compute_farm_state(farm, [], [], [mv])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 1500, (
+            "External Stock In must not add to the already-updated farm_state"
+        )
+
+    # ── Test 8 ────────────────────────────────────────────────────────────────
+    def test_harvest_killing_not_double_applied(self):
+        """
+        Harvest/Killing updates farm_state once. compute_farm_state must not
+        subtract again.
+        """
+        farm = self._farm_with_tank("t1", fish_count=0)  # farm_state after full harvest
+        mv   = {
+            "id": "mv_h", "date": "2026-01-05",
+            "movement_type": "harvest",
+            "from_tank_id": "t1", "to_tank_id": None,
+            "quantity_fish": 2000, "avg_weight_g": 0.0,
+        }
+        states = compute_farm_state(farm, [], [], [mv])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 0
+        assert not is_tank_occupied(s)
+
+    # ── Test 9 ────────────────────────────────────────────────────────────────
+    def test_tank_2_09_style_fixture(self):
+        """
+        Reproduces the tank 2.09 production scenario that triggered the bug:
+        - farm_state.fish_count = 841 (initial setup value before fix)
+        - History: +1346 in, -2194 out, -10 mortality → replay = -17 → 0 (wrong)
+        - After migration farm_state is updated to the correct value via
+          compute_farm_state+adjustments.  Here we simulate the post-migration
+          state: farm_state.fish_count = 1346 (computed with adjustment +1363).
+        - Expected: compute_farm_state returns 1346, tank is occupied.
+        """
+        # Post-migration: farm_state already reflects the adjustment.
+        farm = self._farm_with_tank("t1", fish_count=1346)
+        mvs  = [
+            self._mv_in("t1",  1346, "mv_in"),
+            self._mv_out("t1", 2194, "mv_out"),
+        ]
+        dl  = [self._mortality_log("t1", 10)]
+        adj = [self._adj("t1", 1363)]
+
+        states = compute_farm_state(farm, [], dl, mvs, adjustments=adj)
+        s = next(st for st in states if st["tank_id"] == "t1")
+
+        assert is_tank_occupied(s),           "tank must be occupied (1346 fish)"
+        assert get_tank_fish_count(s) == 1346, "fish_count must come from farm_state"
+        # Informational history totals are still available:
+        assert s["moved_in_fish"]    == 1346
+        assert s["moved_out_fish"]   == 2194
+        assert s["total_mortality"]  == 10
+        assert s["total_adj_variance"] == 1363
