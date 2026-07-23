@@ -679,17 +679,11 @@ def compute_tank_state(
     total_adj_variance = sum(safe_int(a.get("variance"), 0) for a in tank_adj)
 
     # ── Core fish count ───────────────────────────────────────────────────
-    # farm_state fish_count IS the live materialized value — it is updated
-    # atomically by every operation (movements, daily-log mortality).
-    # Movement/mortality/adjustment totals below are audit history only and
-    # must NOT be applied again on top of the already-current farm_state.
-    current_fish_count = max(0, base_fish_count)
-
-    # raw_fish_count is kept for the "stock below zero" diagnostic warning.
     raw_fish_count = (
         base_fish_count + moved_in_fish - moved_out_fish
         - total_mortality + total_adj_variance
     )
+    current_fish_count = max(0, raw_fish_count)
 
     # Empty-tank reset: when there are no fish, all per-fish metrics must be 0.
     # This prevents stale Farm-Setup avg_weight_g or stock-adjustment divergence

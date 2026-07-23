@@ -197,49 +197,17 @@ def _system_measurements_from_logs(entries: list[dict]) -> dict:
     return measurements
 
 
-def _apply_mortality_to_farm(
-    entries: list[dict],
-    prev_by_tank: dict[str, dict],
-) -> None:
-    """Update farm_state fish_count for the net change in logged mortality.
-
-    Called after saving daily log rows.  `prev_by_tank` maps tank_id to the
-    log row that existed before this save (empty dict if none).  Only the
-    *delta* (new − old) is applied so that edits to an existing report don't
-    double-subtract.
-    """
-    farm    = storage.load_farm()
-    changed = False
-    for entry in entries:
-        tid   = entry["tank_id"]
-        new   = int(entry.get("mortality_fish", 0))
-        old   = int(prev_by_tank.get(tid, {}).get("mortality_fish", 0))
-        delta = new - old
-        if delta == 0:
-            continue
-        for system in farm.get("systems", []):
-            for tank in system.get("tanks", []):
-                if tank.get("id") == tid:
-                    tank["fish_count"] = max(
-                        0.0, float(tank.get("fish_count", 0)) - delta
-                    )
-                    changed = True
-    if changed:
-        storage.save_farm(farm)
-
-
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render() -> None:
     st.header("Daily report")
 
-    farm        = storage.load_farm()
-    batches     = storage.load_batches()
-    logs        = storage.load_daily_logs()
-    movements   = storage.load_movements()
-    adjustments = storage.load_adjustments()
+    farm      = storage.load_farm()
+    batches   = storage.load_batches()
+    logs      = storage.load_daily_logs()
+    movements = storage.load_movements()
 
-    tank_states = compute_farm_state(farm, batches, logs, movements, adjustments=adjustments)
+    tank_states = compute_farm_state(farm, batches, logs, movements)
 
     if not tank_states:
         st.warning("No tanks defined. Go to **Farm Setup** first.")
@@ -364,6 +332,33 @@ def render() -> None:
 
         st.divider()
 
+        # ── DEBUG: per-tank diagnostic expander (temporary — remove before release) ──
+        with st.expander("🔍 Debug: tank occupancy diagnostics", expanded=False):
+            sys_obj = next(
+                (s for s in farm.get("systems", []) if s.get("name") == selected_system), {}
+            )
+            st.write(f"**System:** {selected_system}  |  ID: `{sys_obj.get('id', '—')}`")
+            debug_rows = []
+            for s in visible_tanks:
+                tid      = s["tank_id"]
+                ex       = existing_by_tank.get(tid, {})
+                occupied = is_tank_occupied(s)
+                debug_rows.append({
+                    "tank_name":       s.get("tank_name", "—"),
+                    "tank_id":         tid,
+                    "base_fish":       s.get("base_fish_count", "?"),
+                    "moved_in":        s.get("moved_in_fish", 0),
+                    "moved_out":       s.get("moved_out_fish", 0),
+                    "mortality":       s.get("total_mortality", 0),
+                    "fish_count":      s.get("fish_count", 0),
+                    "is_occupied":     occupied,
+                    "ex_mortality":    ex.get("mortality_fish", "—"),
+                    "o2_key":          f"o2_{tid}_{log_date_str}",
+                    "mort_key":        f"mort_{tid}_{log_date_str}",
+                    "mort_enabled":    occupied,
+                })
+            st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
+
         # ── Per-tank entries ───────────────────────────────────────────────
         tank_entries = []
 
@@ -463,10 +458,8 @@ def render() -> None:
                 latest_batches   = storage.load_batches()
                 latest_logs      = storage.load_daily_logs()
                 latest_movements = storage.load_movements()
-                latest_adj       = storage.load_adjustments()
                 latest_states    = compute_farm_state(
-                    latest_farm, latest_batches, latest_logs, latest_movements,
-                    adjustments=latest_adj,
+                    latest_farm, latest_batches, latest_logs, latest_movements
                 )
                 latest_state_map = {s["tank_id"]: s for s in latest_states}
 
@@ -483,14 +476,6 @@ def render() -> None:
                         "Please review and submit again."
                     )
                 else:
-                    # Capture previous mortality per tank for delta calculation.
-                    prev_by_tank = {
-                        l["tank_id"]: l
-                        for l in latest_logs
-                        if l.get("date") == log_date_str
-                        and l.get("system_name") == selected_system
-                    }
-
                     # Upsert: remove existing rows for this date + system + these tanks,
                     # then append the current entries.
                     remaining = [
@@ -502,10 +487,6 @@ def render() -> None:
                         )
                     ]
                     storage.save_daily_logs(remaining + tank_entries)
-
-                    # Update farm_state fish_count for the net mortality change.
-                    _apply_mortality_to_farm(tank_entries, prev_by_tank)
-
                     action = "update" if report_exists else "create"
                     verb   = "Updated" if report_exists else "Created"
                     storage.log_activity(
