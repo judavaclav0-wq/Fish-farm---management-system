@@ -137,14 +137,16 @@ def normalize_empty_tank(tank: dict) -> dict:
     Returns the same dict (mutated in place) for convenience.
 
     Rules:
-      - fish_count <= 0  OR  biomass_kg <= 0  → tank is considered empty.
+      - fish_count is the SINGLE source of truth for occupancy.
+      - fish_count <= 0 → tank is empty; clear all per-fish metrics.
+      - fish_count > 0  → tank is occupied even if biomass_kg == 0
+        (e.g. a tank stocked via External Stock In with no avg weight).
       - Clears: fish_count, biomass_kg, avg_weight_g, density_kg_m3,
                 batch_id, batch_name, batch_composition.
       - Does NOT clear tank identity fields (id, name, volume, etc.).
     """
-    fish    = safe_float(tank.get("fish_count"), 0.0)
-    biomass = safe_float(tank.get("biomass_kg"), 0.0)
-    if fish <= 0 or biomass <= 0:
+    fish = safe_int(tank.get("fish_count"), 0)
+    if fish <= 0:
         tank["fish_count"]        = 0
         tank["biomass_kg"]        = 0.0
         tank["avg_weight_g"]      = 0.0

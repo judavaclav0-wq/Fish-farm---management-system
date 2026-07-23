@@ -12,6 +12,7 @@ import pandas as pd
 from datetime import date
 from core import storage
 from core.stock_engine import compute_farm_state
+from core.calculations import get_tank_fish_count, is_tank_occupied
 
 # PDF
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -338,14 +339,14 @@ def render() -> None:
             tank_id      = state["tank_id"]
             tank_name    = state.get("tank_name", "—")
             ex_tank      = existing_by_tank.get(tank_id, {})
-            current_fish = state.get("fish_count", 0)
+            current_fish = get_tank_fish_count(state)
 
             st.markdown(f"**{tank_name}**")
 
             # Empty tank: no inputs, skip from tank_entries entirely.
             # Any existing historical log row for this tank is preserved
             # in storage because its tank_id won't appear in the save filter.
-            if current_fish <= 0:
+            if not is_tank_occupied(state):
                 st.caption("Tank is empty — O2 and mortality entry disabled.")
                 continue
 
@@ -423,31 +424,56 @@ def render() -> None:
             if log_date > today:
                 st.error("Cannot save a report for a future date.")
             else:
-                # Upsert: remove existing rows for this date + system + these tanks,
-                # then append the current entries.
-                remaining = [
-                    l for l in logs
-                    if not (
-                        l.get("date") == log_date_str
-                        and l.get("system_name") == selected_system
-                        and l.get("tank_id") in {e["tank_id"] for e in tank_entries}
-                    )
-                ]
-                storage.save_daily_logs(remaining + tank_entries)
-                action  = "update" if report_exists else "create"
-                verb    = "Updated" if report_exists else "Created"
-                storage.log_activity(
-                    module="Daily Log",
-                    action=action,
-                    summary=f"{verb} daily report for {selected_system} with {len(tank_entries)} tank entries",
-                    date=log_date_str,
-                    system_name=selected_system,
-                    operator=operator.strip(),
-                    details={"tank_count": len(tank_entries)},
+                # ── Pre-save concurrency check ─────────────────────────────
+                # Reload current farm state so we catch any fish movements that
+                # happened while this form was open.
+                latest_farm      = storage.load_farm()
+                latest_batches   = storage.load_batches()
+                latest_logs      = storage.load_daily_logs()
+                latest_movements = storage.load_movements()
+                latest_states    = compute_farm_state(
+                    latest_farm, latest_batches, latest_logs, latest_movements
                 )
-                st.session_state.pop(pending_key, None)
-                st.success("Updated." if report_exists else "Saved.")
-                st.rerun()
+                latest_state_map = {s["tank_id"]: s for s in latest_states}
+
+                stale_tanks = []
+                for entry in tank_entries:
+                    current = latest_state_map.get(entry["tank_id"], {})
+                    if not is_tank_occupied(current) and entry.get("mortality_fish", 0) > 0:
+                        stale_tanks.append(entry.get("tank_name", entry["tank_id"]))
+
+                if stale_tanks:
+                    st.error(
+                        "Tank stock changed while the Daily Log was open — "
+                        f"{', '.join(stale_tanks)} are now empty. "
+                        "Please review and submit again."
+                    )
+                else:
+                    # Upsert: remove existing rows for this date + system + these tanks,
+                    # then append the current entries.
+                    remaining = [
+                        l for l in latest_logs
+                        if not (
+                            l.get("date") == log_date_str
+                            and l.get("system_name") == selected_system
+                            and l.get("tank_id") in {e["tank_id"] for e in tank_entries}
+                        )
+                    ]
+                    storage.save_daily_logs(remaining + tank_entries)
+                    action = "update" if report_exists else "create"
+                    verb   = "Updated" if report_exists else "Created"
+                    storage.log_activity(
+                        module="Daily Log",
+                        action=action,
+                        summary=f"{verb} daily report for {selected_system} with {len(tank_entries)} tank entries",
+                        date=log_date_str,
+                        system_name=selected_system,
+                        operator=operator.strip(),
+                        details={"tank_count": len(tank_entries)},
+                    )
+                    st.session_state.pop(pending_key, None)
+                    st.success("Updated." if report_exists else "Saved.")
+                    st.rerun()
 
         if col_pdf.button("Generate PDF"):
             states_today = compute_farm_state(

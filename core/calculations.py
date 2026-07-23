@@ -166,6 +166,25 @@ def safe_int(value, default=0):
         return default
 
 
+def get_tank_fish_count(tank: dict, default: int = 0) -> int:
+    """Return the normalized fish count for a tank dict (state or setup dict).
+
+    fish_count is the single source of truth for tank occupancy.
+    Handles int, float, numeric string, empty string, and None.
+    Never returns negative values.
+    """
+    return max(0, safe_int(tank.get("fish_count", default), default))
+
+
+def is_tank_occupied(tank: dict) -> bool:
+    """Return True when a tank currently holds fish.
+
+    Uses fish_count exclusively.  Do NOT use biomass_kg, batch_id,
+    batch_name, or any other field to determine occupancy.
+    """
+    return get_tank_fish_count(tank) > 0
+
+
 # ---------------------------------------------------------------------------
 # Compatibility wrappers for new stock engine
 # ---------------------------------------------------------------------------

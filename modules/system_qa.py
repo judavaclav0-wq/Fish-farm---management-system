@@ -10,6 +10,7 @@ import streamlit as st
 
 from core.auth import require_role
 from core.stock_engine import compute_tank_state
+from core.calculations import is_tank_occupied
 
 
 # ── Mock data factories ───────────────────────────────────────────────────────
@@ -227,30 +228,30 @@ def test_negative_stock_prevention() -> dict:
 
 def test_daily_log_active_tank_rule() -> dict:
     """
-    A tank is considered active (eligible for mortality input) only when
-    fish_count > 0 AND biomass_kg > 0.
+    A tank is occupied (eligible for mortality input) when fish_count > 0.
+    biomass_kg is irrelevant — a tank with fish but no avg weight is still occupied.
+    is_tank_occupied() from core.calculations is the single source of truth.
     """
-    active = _tank("t_active", fish_count=100, avg_weight_g=151.5)
-    empty  = _tank("t_empty",  fish_count=0,   avg_weight_g=0.0)
+    active         = _tank("t_active",    fish_count=100, avg_weight_g=151.5)
+    empty          = _tank("t_empty",     fish_count=0,   avg_weight_g=0.0)
+    fish_no_weight = _tank("t_no_weight", fish_count=500, avg_weight_g=0.0)
 
-    s_active = _state(active)
-    s_empty  = _state(empty)
+    s_active         = _state(active)
+    s_empty          = _state(empty)
+    s_fish_no_weight = _state(fish_no_weight)
 
-    def is_active(s: dict) -> bool:
-        return s["fish_count"] > 0 and s["biomass_kg"] > 0
-
-    ok = is_active(s_active) and not is_active(s_empty)
-    expected = {"active tank → is_active": True, "empty tank → is_active": False}
-    actual   = {
-        "active tank → is_active": is_active(s_active),
-        "empty tank → is_active":  is_active(s_empty),
+    results = {
+        "active tank (fish>0, weight>0) → occupied":   is_tank_occupied(s_active),
+        "empty tank (fish=0) → not occupied":           not is_tank_occupied(s_empty),
+        "fish with no avg weight → still occupied":     is_tank_occupied(s_fish_no_weight),
     }
+    ok = all(results.values())
     return {
         "name": "8. Daily log active-tank rule",
         "passed": ok,
-        "expected": expected,
-        "actual": actual,
-        "error": None if ok else "Active/inactive tank detection returned wrong result.",
+        "expected": {k: True for k in results},
+        "actual":   results,
+        "error": None if ok else "is_tank_occupied() returned wrong result for one or more fixtures.",
     }
 
 
