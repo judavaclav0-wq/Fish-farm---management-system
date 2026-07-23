@@ -41,6 +41,21 @@ def _treatments_str(treatment_type: str, treatment_amount: float, treatment_unit
     return f"{treatment_type} {treatment_amount} {treatment_unit}".strip()
 
 
+def _normalize_treatments(record: dict) -> list[dict]:
+    """Return a list of treatment dicts from any record format (new or legacy)."""
+    tl = record.get("treatments_list")
+    if isinstance(tl, list):
+        return [t for t in tl if isinstance(t, dict) and t.get("type") and t["type"] != "None"]
+    t_type = record.get("treatment_type", "None") or "None"
+    if t_type and t_type != "None":
+        return [{
+            "type":   t_type,
+            "amount": float(record.get("treatment_amount", 0.0) or 0.0),
+            "unit":   record.get("treatment_unit", TREATMENT_UNITS.get(t_type, "")) or "",
+        }]
+    return []
+
+
 # ── PDF ────────────────────────────────────────────────────────────────────────
 
 def _generate_pdf(
@@ -48,6 +63,7 @@ def _generate_pdf(
     tank_states, entries, measurements, summary,
     treatments, notes,
     chemicals=None,
+    treatments_list=None,
 ):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer)
@@ -73,14 +89,22 @@ def _generate_pdf(
     # ── Chemicals / Treatments ─────────────────────────────
     elements.append(Paragraph("<b>Chemicals / Treatments</b>", styles["Heading3"]))
     ch = chemicals or {}
-    bic_kg   = ch.get("bicarbonate_kg",   0)
-    t_type   = ch.get("treatment_type",   "None") or "None"
-    t_amount = ch.get("treatment_amount", 0)
-    t_unit   = ch.get("treatment_unit",   "")
+    bic_kg = ch.get("bicarbonate_kg", 0)
     elements.append(Paragraph(f"Bicarbonate: {bic_kg} kg", styles["Normal"]))
-    elements.append(Paragraph(f"Treatment: {t_type}",      styles["Normal"]))
-    if t_type != "None":
-        elements.append(Paragraph(f"Amount: {t_amount} {t_unit}", styles["Normal"]))
+    t_list = treatments_list or []
+    if t_list:
+        for t in t_list:
+            elements.append(Paragraph(
+                f"Treatment: {t.get('type', '')} {t.get('amount', '')} {t.get('unit', '')}".strip(),
+                styles["Normal"],
+            ))
+    else:
+        t_type   = ch.get("treatment_type",   "None") or "None"
+        t_amount = ch.get("treatment_amount", 0)
+        t_unit   = ch.get("treatment_unit",   "")
+        elements.append(Paragraph(f"Treatment: {t_type}", styles["Normal"]))
+        if t_type != "None":
+            elements.append(Paragraph(f"Amount: {t_amount} {t_unit}", styles["Normal"]))
     elements.append(Spacer(1, 12))
 
     # ── Tank table ─────────────────────────────────────────
@@ -158,7 +182,7 @@ def _system_measurements_from_logs(entries: list[dict]) -> dict:
     skip_cols = {
         "date", "farm_name", "farm_id", "system_name", "operator",
         "tank_id", "tank_name", "feed_kg", "oxygen", "mortality_fish",
-        "treatments", "notes",
+        "treatments", "treatments_list", "notes",
         "bicarbonate_kg", "treatment_type", "treatment_amount", "treatment_unit",
     }
 
@@ -260,37 +284,50 @@ def render() -> None:
             key=f"bicarbonate_{selected_system}_{log_date_str}",
         )
 
-        # ── Treatment type (system-level) ──────────────────────────────────
-        saved_ttype = (first_existing.get("treatment_type", "None") or "None") if report_exists else "None"
-        if saved_ttype not in TREATMENT_OPTIONS:
-            saved_ttype = "None"
+        # ── Treatments (system-level, multiple) ───────────────────────────
+        st.markdown("**Treatments**")
+        pending_key = f"_dl_pend_tx_{selected_system}_{log_date_str}"
 
-        treatment_type = st.selectbox(
-            "Treatment type",
-            options=TREATMENT_OPTIONS,
-            index=TREATMENT_OPTIONS.index(saved_ttype),
-            key=f"treatment_type_{selected_system}_{log_date_str}",
-        )
+        if pending_key not in st.session_state:
+            st.session_state[pending_key] = (
+                _normalize_treatments(first_existing) if report_exists else []
+            )
 
-        treatment_amount_val = 0.0
-        if treatment_type != "None":
-            unit_label = TREATMENT_UNITS.get(treatment_type, "")
-            # Prefill amount only when saved type matches current selection
-            if report_exists and first_existing.get("treatment_type") == treatment_type:
-                prefill_amount = float(first_existing.get("treatment_amount", 0.0) or 0.0)
-            else:
-                prefill_amount = 0.0
-            treatment_amount_val = float(st.number_input(
-                f"Amount ({unit_label})",
-                min_value=0.0,
-                value=prefill_amount,
+        pending_treatments = st.session_state[pending_key]
+
+        if pending_treatments:
+            for i, t in enumerate(pending_treatments):
+                tc1, tc2 = st.columns([5, 1])
+                tc1.write(f"**{t['type']}** — {t['amount']} {t['unit']}")
+                if tc2.button("✕", key=f"rm_t_{i}_{pending_key}"):
+                    st.session_state[pending_key].pop(i)
+                    st.rerun()
+        else:
+            st.caption("No treatments added.")
+
+        with st.expander("Add treatment", expanded=not bool(pending_treatments)):
+            add_ttype = st.selectbox(
+                "Treatment type",
+                options=[o for o in TREATMENT_OPTIONS if o != "None"],
+                key=f"add_ttype_{selected_system}_{log_date_str}",
+            )
+            add_unit = TREATMENT_UNITS.get(add_ttype, "")
+            add_amount = float(st.number_input(
+                f"Amount ({add_unit})" if add_unit else "Amount",
+                min_value=0.01,
+                value=0.10,
                 step=0.1,
                 format="%.2f",
-                key=f"treatment_amount_{selected_system}_{log_date_str}",
+                key=f"add_tamount_{selected_system}_{log_date_str}",
             ))
-
-        treatment_unit_val = TREATMENT_UNITS.get(treatment_type, "")
-        treatments_str     = _treatments_str(treatment_type, treatment_amount_val, treatment_unit_val)
+            if st.button("Add treatment", key=f"add_tbtn_{selected_system}_{log_date_str}"):
+                if add_amount <= 0:
+                    st.error("Amount must be greater than zero.")
+                else:
+                    st.session_state[pending_key].append(
+                        {"type": add_ttype, "amount": add_amount, "unit": add_unit}
+                    )
+                    st.rerun()
 
         st.divider()
 
@@ -351,10 +388,14 @@ def render() -> None:
                 "mortality_fish":   int(mortality),
                 # Chemical fields — same for every tank row in this system/date
                 "bicarbonate_kg":   float(bicarbonate_kg),
-                "treatment_type":   treatment_type,
-                "treatment_amount": treatment_amount_val,
-                "treatment_unit":   treatment_unit_val,
-                "treatments":       treatments_str,  # backward-compat string
+                "treatments_list":  pending_treatments,
+                # Backward-compat scalar fields (first treatment only)
+                "treatment_type":   pending_treatments[0]["type"]   if pending_treatments else "None",
+                "treatment_amount": pending_treatments[0]["amount"] if pending_treatments else 0.0,
+                "treatment_unit":   pending_treatments[0]["unit"]   if pending_treatments else "",
+                "treatments": " | ".join(
+                    f"{t['type']} {t['amount']} {t['unit']}" for t in pending_treatments
+                ) if pending_treatments else "",
             }
 
             for p, v in measurements.items():
@@ -404,6 +445,7 @@ def render() -> None:
                     operator=operator.strip(),
                     details={"tank_count": len(tank_entries)},
                 )
+                st.session_state.pop(pending_key, None)
                 st.success("Updated." if report_exists else "Saved.")
                 st.rerun()
 
@@ -414,17 +456,15 @@ def render() -> None:
             )
 
             chemicals = {
-                "bicarbonate_kg":   float(bicarbonate_kg),
-                "treatment_type":   treatment_type,
-                "treatment_amount": treatment_amount_val,
-                "treatment_unit":   treatment_unit_val,
+                "bicarbonate_kg": float(bicarbonate_kg),
             }
 
             pdf = _generate_pdf(
                 farm_name, selected_system, log_date_str, operator,
                 states_today, tank_entries, measurements, summary,
-                treatments_str, notes,
+                "", notes,
                 chemicals=chemicals,
+                treatments_list=pending_treatments,
             )
 
             st.download_button(
@@ -506,13 +546,11 @@ def render() -> None:
         notes     = selected_entries[0].get("notes", "")
 
         # Read system-level chemical fields from first entry (same on all tank rows)
-        saved_bicarbonate_kg   = float(selected_entries[0].get("bicarbonate_kg",   0) or 0)
-        saved_treatment_type   = selected_entries[0].get("treatment_type",   "None") or "None"
-        saved_treatment_amount = float(selected_entries[0].get("treatment_amount", 0) or 0)
+        saved_bicarbonate_kg = float(selected_entries[0].get("bicarbonate_kg", 0) or 0)
 
-        # Normalise: old text-only records won't have treatment_type in options
-        if saved_treatment_type not in TREATMENT_OPTIONS:
-            saved_treatment_type = "None"
+        edit_tx_key = f"_dl_edit_tx_{selected_date}_{selected_system}"
+        if edit_tx_key not in st.session_state:
+            st.session_state[edit_tx_key] = _normalize_treatments(selected_entries[0])
 
         st.markdown("### Selected daily report")
 
@@ -539,9 +577,7 @@ def render() -> None:
         # ── Chemicals / Treatments (system-level edit) ─────────────────────
         st.markdown("### Chemicals / Treatments")
 
-        ec1, ec2 = st.columns(2)
-
-        edit_bicarbonate_kg = float(ec1.number_input(
+        edit_bicarbonate_kg = float(st.number_input(
             "Bicarbonate (kg)",
             min_value=0.0,
             value=saved_bicarbonate_kg,
@@ -550,28 +586,42 @@ def render() -> None:
             key=f"edit_bicarbonate_{selected_date}_{selected_system}",
         ))
 
-        edit_treatment_type = ec2.selectbox(
-            "Treatment type",
-            options=TREATMENT_OPTIONS,
-            index=TREATMENT_OPTIONS.index(saved_treatment_type),
-            key=f"edit_treatment_type_{selected_date}_{selected_system}",
-        )
+        st.markdown("**Treatments**")
+        edit_treatments = st.session_state[edit_tx_key]
 
-        edit_treatment_amount_val = 0.0
-        if edit_treatment_type != "None":
-            edit_unit_label = TREATMENT_UNITS.get(edit_treatment_type, "")
-            # Pre-fill amount only when type matches the saved type
-            prefill = saved_treatment_amount if edit_treatment_type == saved_treatment_type else 0.0
-            edit_treatment_amount_val = float(st.number_input(
-                f"Amount ({edit_unit_label})",
-                min_value=0.0,
-                value=prefill,
+        if edit_treatments:
+            for i, t in enumerate(edit_treatments):
+                etx1, etx2 = st.columns([5, 1])
+                etx1.write(f"**{t['type']}** — {t['amount']} {t['unit']}")
+                if etx2.button("✕", key=f"rm_edit_t_{i}_{edit_tx_key}"):
+                    st.session_state[edit_tx_key].pop(i)
+                    st.rerun()
+        else:
+            st.caption("No treatments.")
+
+        with st.expander("Add treatment", expanded=not bool(edit_treatments)):
+            add_ttype_e = st.selectbox(
+                "Treatment type",
+                options=[o for o in TREATMENT_OPTIONS if o != "None"],
+                key=f"add_ttype_e_{selected_date}_{selected_system}",
+            )
+            add_unit_e = TREATMENT_UNITS.get(add_ttype_e, "")
+            add_amount_e = float(st.number_input(
+                f"Amount ({add_unit_e})" if add_unit_e else "Amount",
+                min_value=0.01,
+                value=0.10,
                 step=0.1,
                 format="%.2f",
-                key=f"edit_treatment_amount_{selected_date}_{selected_system}",
+                key=f"add_tamount_e_{selected_date}_{selected_system}",
             ))
-
-        edit_treatment_unit = TREATMENT_UNITS.get(edit_treatment_type, "")
+            if st.button("Add treatment", key=f"add_tbtn_e_{selected_date}_{selected_system}"):
+                if add_amount_e <= 0:
+                    st.error("Amount must be greater than zero.")
+                else:
+                    st.session_state[edit_tx_key].append(
+                        {"type": add_ttype_e, "amount": add_amount_e, "unit": add_unit_e}
+                    )
+                    st.rerun()
 
         # ── Tank data ──────────────────────────────────────────────────────
         st.markdown("### Tank data")
@@ -633,19 +683,21 @@ def render() -> None:
             key=f"edit_notes_{selected_date}_{selected_system}",
         )
 
-        # Build treatment string and apply all system-level fields to every entry
-        edit_treatments_str = _treatments_str(
-            edit_treatment_type, edit_treatment_amount_val, edit_treatment_unit
-        )
+        # Apply system-level fields to every entry
+        edit_treatments  = st.session_state[edit_tx_key]
+        first_edit_tx    = edit_treatments[0] if edit_treatments else {}
 
         for entry in edited_entries:
             entry["operator"]         = edit_operator.strip()
             entry["notes"]            = edit_notes.strip()
             entry["bicarbonate_kg"]   = edit_bicarbonate_kg
-            entry["treatment_type"]   = edit_treatment_type
-            entry["treatment_amount"] = edit_treatment_amount_val
-            entry["treatment_unit"]   = edit_treatment_unit
-            entry["treatments"]       = edit_treatments_str
+            entry["treatments_list"]  = edit_treatments
+            entry["treatment_type"]   = first_edit_tx.get("type",   "None") if first_edit_tx else "None"
+            entry["treatment_amount"] = first_edit_tx.get("amount", 0.0)    if first_edit_tx else 0.0
+            entry["treatment_unit"]   = first_edit_tx.get("unit",   "")     if first_edit_tx else ""
+            entry["treatments"] = " | ".join(
+                f"{t['type']} {t['amount']} {t['unit']}" for t in edit_treatments
+            ) if edit_treatments else ""
 
         col_save, col_delete, col_pdf = st.columns(3)
 
@@ -668,6 +720,7 @@ def render() -> None:
                 operator=edit_operator.strip(),
                 details={"tank_count": len(edited_entries)},
             )
+            st.session_state.pop(edit_tx_key, None)
             st.success("Daily report updated.")
             st.rerun()
 
@@ -697,18 +750,16 @@ def render() -> None:
             )
 
             hist_chemicals = {
-                "bicarbonate_kg":   edit_bicarbonate_kg,
-                "treatment_type":   edit_treatment_type,
-                "treatment_amount": edit_treatment_amount_val,
-                "treatment_unit":   edit_treatment_unit,
+                "bicarbonate_kg": edit_bicarbonate_kg,
             }
 
             pdf = _generate_pdf(
                 farm_name, selected_system, selected_date, edit_operator,
                 states_selected_date, edited_entries, edited_measurements,
                 _mortality_summary(edited_entries),
-                edit_treatments_str, edit_notes,
+                "", edit_notes,
                 chemicals=hist_chemicals,
+                treatments_list=edit_treatments,
             )
 
             st.download_button(
