@@ -243,13 +243,15 @@ def render() -> None:
                         movements=movements,
                         adjustments=adjustments,
                     )
-                    eso_fish    = eso_src_state.get("fish_count", 0)
+                    eso_fish        = eso_src_state.get("fish_count", 0)
                     eso_biomass_cur = eso_src_state.get("biomass_kg", 0.0)
-                    eso_avg_w_cur = eso_src_state.get("avg_weight_g", 0.0)
+                    eso_avg_w_cur   = eso_src_state.get("avg_weight_g", 0.0)
+
                     st.caption(
                         f"**{eso_from_tank_name}** current stock: "
                         f"{eso_fish:,} fish | {eso_biomass_cur:.1f} kg | {eso_avg_w_cur:.1f} g avg"
                     )
+                    st.caption(f"Current average weight: **{eso_avg_w_cur:.1f} g**")
 
                     eso_batch_id   = eso_from_tank.get("batch_id", "")
                     eso_batch_name = eso_from_tank.get("batch_name", "")
@@ -263,142 +265,176 @@ def render() -> None:
 
                     st.divider()
 
-                    eso_q1, eso_q2, eso_q3 = st.columns(3)
-                    eso_qty_fish = eso_q1.number_input(
-                        "Fish count",
-                        min_value=1,
-                        value=max(1, eso_fish) if eso_fish > 0 else 1,
-                        step=10,
-                        key="eso_qty_fish",
-                    )
-                    eso_avg_w = eso_q2.number_input(
-                        "Average weight (g)",
-                        min_value=0.1,
-                        value=max(0.1, float(eso_avg_w_cur)) if eso_avg_w_cur > 0 else 100.0,
-                        step=1.0,
-                        format="%.1f",
-                        key="eso_avg_w",
-                    )
-                    eso_biomass = round(float(eso_qty_fish) * float(eso_avg_w) / 1000, 3)
-                    eso_q3.metric("Biomass (kg)", f"{eso_biomass:.3f}")
+                    if eso_avg_w_cur <= 0:
+                        st.error(
+                            "Cannot record External Stock Out: source tank has no valid "
+                            "average weight. Update the tank stock first."
+                        )
+                    else:
+                        eso_quantity_mode = st.radio(
+                            "Input method",
+                            ["Fish count", "Biomass kg"],
+                            horizontal=True,
+                            key="eso_quantity_mode",
+                        )
 
-                    eso_destination = st.text_input(
-                        "External destination",
-                        placeholder="e.g. Processing plant, Another farm, Retailer…",
-                        key="eso_destination_input",
-                    )
-                    eso_notes = st.text_area("Notes", height=68, key="eso_notes")
-
-                    eso_submitted = st.button(
-                        "Save movement", type="primary", key="eso_save_btn"
-                    )
-
-                    if eso_submitted:
-                        eso_errors = []
-                        if not eso_from_tank:
-                            eso_errors.append("Select a source tank.")
-                        if int(eso_qty_fish) <= 0:
-                            eso_errors.append("Fish count must be greater than zero.")
-                        if float(eso_avg_w) <= 0:
-                            eso_errors.append("Average weight must be greater than zero.")
-                        if eso_biomass <= 0:
-                            eso_errors.append("Biomass must be greater than zero.")
-                        if not eso_destination.strip():
-                            eso_errors.append("External destination is required.")
-                        if not eso_complete and int(eso_qty_fish) > eso_fish:
-                            eso_errors.append(
-                                f"Cannot move {int(eso_qty_fish):,} fish — only "
-                                f"{eso_fish:,} available in {eso_from_tank_name}."
+                        if eso_quantity_mode == "Fish count":
+                            eso_qty_fish = st.number_input(
+                                "Fish count",
+                                min_value=1,
+                                value=max(1, eso_fish) if eso_fish > 0 else 1,
+                                step=10,
+                                key="eso_qty_fish",
                             )
-
-                        if eso_errors:
-                            for err in eso_errors:
-                                st.error(err)
-                        else:
-                            record = {
-                                "id":            storage.new_id("mv_"),
-                                "date":          str(mv_date),
-                                "movement_type": "external_stock_out",
-
-                                "from_system_name": eso_from_system,
-                                "from_tank_id":     eso_from_tank["id"],
-                                "from_tank_name":   eso_from_tank["name"],
-
-                                "to_system_name": "",
-                                "to_tank_id":     None,
-                                "to_tank_name":   "",
-
-                                "destination":            "",
-                                "external_destination":   eso_destination.strip(),
-                                "quantity_mode":          "fish",
-                                "quantity_fish":          int(eso_qty_fish),
-                                "quantity_kg":            float(eso_biomass),
-                                "avg_weight_g":           float(eso_avg_w),
-
-                                "batch_id":   eso_batch_id,
-                                "batch_name": eso_batch_name,
-
-                                "reason":      "",
-                                "operator":    mv_operator.strip(),
-                                "notes":       eso_notes.strip(),
-                                "tank_emptied": eso_complete,
-                            }
-
-                            storage.append_movement(record)
-
-                            # Complete-tank reconciliation: if the tank was declared empty,
-                            # create a variance adjustment to zero remaining fish.
-                            if eso_complete:
-                                remaining = eso_fish - int(eso_qty_fish)
-                                if remaining != 0:
-                                    adj_record = {
-                                        "id":             storage.new_id("adj_"),
-                                        "date":           str(mv_date),
-                                        "timestamp":      datetime.now().isoformat(),
-                                        "tank_id":        eso_from_tank["id"],
-                                        "tank_name":      eso_from_tank_name,
-                                        "system_name":    eso_from_system,
-                                        "batch_id":       eso_batch_id or "",
-                                        "batch_name":     eso_batch_name or "",
-                                        "expected_count": eso_fish,
-                                        "actual_count":   int(eso_qty_fish),
-                                        "variance":       -remaining,
-                                        "variance_pct":   round(
-                                            -remaining / eso_fish * 100, 2
-                                        ) if eso_fish > 0 else 0.0,
-                                        "note":           "Tank emptied reconciliation",
-                                        "movement_id":    record["id"],
-                                        "operator":       mv_operator.strip(),
-                                    }
-                                    storage.append_adjustment(adj_record)
-
-                            storage.log_activity(
-                                module="Movements",
-                                action="create",
-                                summary=(
-                                    f"External Stock Out: {int(eso_qty_fish):,} fish "
-                                    f"from {eso_from_tank_name} → {eso_destination.strip()}"
-                                ),
-                                date=str(mv_date),
-                                system_name=eso_from_system,
-                                tank_id=str(eso_from_tank.get("id", "")),
-                                tank_name=eso_from_tank_name,
-                                operator=mv_operator.strip(),
-                                details={
-                                    "quantity_fish":        int(eso_qty_fish),
-                                    "quantity_kg":          float(eso_biomass),
-                                    "avg_weight_g":         float(eso_avg_w),
-                                    "movement_type":        "external_stock_out",
-                                    "external_destination": eso_destination.strip(),
-                                    "tank_emptied":         eso_complete,
-                                },
+                            eso_biomass = round(
+                                float(eso_qty_fish) * float(eso_avg_w_cur) / 1000, 3
                             )
+                            st.caption(f"Calculated biomass: **{eso_biomass:.3f} kg**")
 
-                            st.success(
-                                f"External Stock Out saved: {int(eso_qty_fish):,} fish "
-                                f"from {eso_from_tank_name} → {eso_destination.strip()}."
+                        else:  # Biomass kg
+                            eso_biomass_input = st.number_input(
+                                "Biomass (kg)",
+                                min_value=0.0,
+                                value=0.0,
+                                step=0.5,
+                                format="%.2f",
+                                key="eso_biomass_input",
                             )
-                            st.rerun()
+                            # Same rounding as Harvest
+                            eso_qty_fish = (
+                                int(round(float(eso_biomass_input) / (float(eso_avg_w_cur) / 1000)))
+                                if eso_avg_w_cur > 0 else 0
+                            )
+                            # Recalculate effective biomass from whole fish count
+                            eso_biomass = round(
+                                float(eso_qty_fish) * float(eso_avg_w_cur) / 1000, 3
+                            )
+                            st.caption(f"Calculated fish count: **{eso_qty_fish:,} fish**")
+                            if eso_biomass_input > 0 and abs(eso_biomass - float(eso_biomass_input)) > 1e-6:
+                                st.caption(
+                                    f"Effective biomass after rounding: **{eso_biomass:.3f} kg**"
+                                )
+
+                        eso_destination = st.text_input(
+                            "External destination",
+                            placeholder="e.g. Processing plant, Another farm, Retailer…",
+                            key="eso_destination_input",
+                        )
+                        eso_notes = st.text_area("Notes", height=68, key="eso_notes")
+
+                        eso_submitted = st.button(
+                            "Save movement", type="primary", key="eso_save_btn"
+                        )
+
+                        if eso_submitted:
+                            eso_errors = []
+                            if int(eso_qty_fish) <= 0:
+                                eso_errors.append("Fish count must be greater than zero.")
+                            if eso_biomass <= 0:
+                                eso_errors.append("Biomass must be greater than zero.")
+                            if not eso_destination.strip():
+                                eso_errors.append("External destination is required.")
+                            if not eso_complete:
+                                if int(eso_qty_fish) > eso_fish:
+                                    eso_errors.append(
+                                        f"Cannot move {int(eso_qty_fish):,} fish — only "
+                                        f"{eso_fish:,} available in {eso_from_tank_name}."
+                                    )
+                                elif eso_biomass > eso_biomass_cur + 1e-6:
+                                    eso_errors.append(
+                                        f"Biomass {eso_biomass:.3f} kg exceeds available "
+                                        f"{eso_biomass_cur:.3f} kg in {eso_from_tank_name}."
+                                    )
+
+                            if eso_errors:
+                                for err in eso_errors:
+                                    st.error(err)
+                            else:
+                                record = {
+                                    "id":            storage.new_id("mv_"),
+                                    "date":          str(mv_date),
+                                    "movement_type": "external_stock_out",
+
+                                    "from_system_name": eso_from_system,
+                                    "from_tank_id":     eso_from_tank["id"],
+                                    "from_tank_name":   eso_from_tank["name"],
+
+                                    "to_system_name": "",
+                                    "to_tank_id":     None,
+                                    "to_tank_name":   "",
+
+                                    "destination":            "",
+                                    "external_destination":   eso_destination.strip(),
+                                    "quantity_mode":          (
+                                        "fish" if eso_quantity_mode == "Fish count" else "kg"
+                                    ),
+                                    "quantity_fish":          int(eso_qty_fish),
+                                    "quantity_kg":            float(eso_biomass),
+                                    "avg_weight_g":           float(eso_avg_w_cur),
+
+                                    "batch_id":   eso_batch_id,
+                                    "batch_name": eso_batch_name,
+
+                                    "reason":       "",
+                                    "operator":     mv_operator.strip(),
+                                    "notes":        eso_notes.strip(),
+                                    "tank_emptied": eso_complete,
+                                }
+
+                                storage.append_movement(record)
+
+                                # Complete-tank reconciliation: zero remaining fish.
+                                if eso_complete:
+                                    remaining = eso_fish - int(eso_qty_fish)
+                                    if remaining != 0:
+                                        adj_record = {
+                                            "id":             storage.new_id("adj_"),
+                                            "date":           str(mv_date),
+                                            "timestamp":      datetime.now().isoformat(),
+                                            "tank_id":        eso_from_tank["id"],
+                                            "tank_name":      eso_from_tank_name,
+                                            "system_name":    eso_from_system,
+                                            "batch_id":       eso_batch_id or "",
+                                            "batch_name":     eso_batch_name or "",
+                                            "expected_count": eso_fish,
+                                            "actual_count":   int(eso_qty_fish),
+                                            "variance":       -remaining,
+                                            "variance_pct":   round(
+                                                -remaining / eso_fish * 100, 2
+                                            ) if eso_fish > 0 else 0.0,
+                                            "note":           "Tank emptied reconciliation",
+                                            "movement_id":    record["id"],
+                                            "operator":       mv_operator.strip(),
+                                        }
+                                        storage.append_adjustment(adj_record)
+
+                                storage.log_activity(
+                                    module="Movements",
+                                    action="create",
+                                    summary=(
+                                        f"External Stock Out: {int(eso_qty_fish):,} fish "
+                                        f"from {eso_from_tank_name} → {eso_destination.strip()}"
+                                    ),
+                                    date=str(mv_date),
+                                    system_name=eso_from_system,
+                                    tank_id=str(eso_from_tank.get("id", "")),
+                                    tank_name=eso_from_tank_name,
+                                    operator=mv_operator.strip(),
+                                    details={
+                                        "quantity_fish":        int(eso_qty_fish),
+                                        "quantity_kg":          float(eso_biomass),
+                                        "avg_weight_g":         float(eso_avg_w_cur),
+                                        "movement_type":        "external_stock_out",
+                                        "external_destination": eso_destination.strip(),
+                                        "tank_emptied":         eso_complete,
+                                    },
+                                )
+
+                                st.success(
+                                    f"External Stock Out saved: {int(eso_qty_fish):,} fish "
+                                    f"from {eso_from_tank_name} → {eso_destination.strip()}."
+                                )
+                                st.rerun()
 
         # ── Transfer / Harvest / Killing form ─────────────────────────────
         else:

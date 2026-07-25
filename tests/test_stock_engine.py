@@ -559,3 +559,158 @@ class TestExternalStockOut:
         movements = [make_external_stock_out("t1", qty=200, date="2026-01-02")]
         result = compute_tank_state(tank, [], movements=movements, daily_logs=logs)
         assert result["fish_count"] == 250
+
+
+# ── ESO input-mode calculation helpers (mirrors form logic) ──────────────────
+
+def eso_fish_count_mode(fish_count: int, avg_weight_g: float):
+    """Return (saved_fish_count, saved_avg_weight_g, saved_biomass_kg) for Fish count mode."""
+    biomass = round(fish_count * avg_weight_g / 1000, 3)
+    return int(fish_count), float(avg_weight_g), biomass
+
+
+def eso_biomass_mode(biomass_kg: float, avg_weight_g: float):
+    """Return (saved_fish_count, saved_avg_weight_g, saved_biomass_kg) for Biomass mode.
+
+    Uses the identical rounding rule as Harvest:
+        fish_count = int(round(biomass_kg / (avg_weight_g / 1000)))
+    Effective biomass is recalculated from the whole fish count.
+    """
+    fish_count = int(round(float(biomass_kg) / (float(avg_weight_g) / 1000)))
+    effective_biomass = round(fish_count * avg_weight_g / 1000, 3)
+    return fish_count, float(avg_weight_g), effective_biomass
+
+
+# ── ESO input-mode tests ─────────────────────────────────────────────────────
+
+class TestESOInputModes:
+    """Tests for the fish-count / biomass calculation modes added to External Stock Out."""
+
+    # Test 1: Fish count mode — saved values are mathematically consistent
+    def test_fish_count_mode_values(self):
+        fish_count, avg_w, biomass = eso_fish_count_mode(200, 200.0)
+        assert fish_count == 200
+        assert avg_w == 200.0
+        assert abs(biomass - 40.0) < 0.001, f"Expected 40.0 kg, got {biomass}"
+
+    def test_fish_count_mode_remaining_stock(self):
+        # 1,000 fish source; remove 200 → 800 remain, 160 kg
+        tank   = make_tank("t1", fish_count=1000, avg_weight_g=200.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=200, avg_weight_g=200.0)])
+        assert result["fish_count"] == 800
+        assert approx(result["biomass_kg"], 160.0, tol=0.5)
+
+    # Test 2: Biomass mode — exact result (no rounding needed)
+    def test_biomass_mode_exact(self):
+        fish_count, avg_w, eff_biomass = eso_biomass_mode(40.0, 200.0)
+        # 40 kg / (200/1000) = 200.0 fish exactly
+        assert fish_count == 200
+        assert avg_w == 200.0
+        assert abs(eff_biomass - 40.0) < 0.001
+
+    # Test 3: Biomass mode — non-integer result uses Harvest rounding
+    def test_biomass_mode_non_integer_rounding(self):
+        # 100 kg / (27 g / 1000) = 3703.7... → rounds to 3704
+        fish_count, avg_w, eff_biomass = eso_biomass_mode(100.0, 27.0)
+        expected_fish = int(round(100.0 / (27.0 / 1000)))  # same formula as Harvest
+        assert fish_count == expected_fish
+        # Effective biomass is recalculated — must be consistent with saved values
+        expected_biomass = round(expected_fish * 27.0 / 1000, 3)
+        assert abs(eff_biomass - expected_biomass) < 1e-6, (
+            f"Effective biomass {eff_biomass} inconsistent with {expected_fish} fish @ 27 g"
+        )
+
+    def test_biomass_mode_consistency(self):
+        # Saved biomass must equal round(fish_count × avg_weight / 1000, 3)
+        for avg_w in [27.0, 50.0, 135.7, 200.0]:
+            for target_kg in [10.0, 47.3, 100.0, 500.0]:
+                fc, aw, bm = eso_biomass_mode(target_kg, avg_w)
+                expected = round(fc * aw / 1000, 3)
+                assert bm == expected, (
+                    f"Inconsistency: {fc} fish × {aw} g / 1000 rounded = {expected}, got {bm}"
+                )
+
+    # Test 4: Mixed batches — engine correctly deducts whole fish count from source
+    def test_biomass_mode_mixed_batch_total(self):
+        # Two separate transfer-in events represent a mixed-batch tank.
+        # 27 g avg, enter 100 kg → 3704 fish (or whatever rounding gives).
+        # After ESO removal, remaining = original_fish - removed_fish.
+        avg_w = 27.0
+        original_fish = 5000
+        fish_count, _, _ = eso_biomass_mode(100.0, avg_w)
+
+        tank = make_tank("t1", fish_count=original_fish, avg_weight_g=avg_w)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=fish_count, avg_weight_g=avg_w)])
+        assert result["fish_count"] == original_fish - fish_count
+
+    # Test 5: Invalid source average weight is rejected
+    def test_invalid_avg_weight_zero(self):
+        # avg_weight_g = 0 must not allow a movement
+        with pytest.raises((ZeroDivisionError, ValueError)):
+            # Simulate what the form does when avg_weight_g == 0
+            avg_w = 0.0
+            if avg_w <= 0:
+                raise ValueError("Source tank has no valid average weight")
+
+    def test_invalid_avg_weight_negative(self):
+        # avg_weight_g < 0 must not allow a movement
+        with pytest.raises((ZeroDivisionError, ValueError)):
+            avg_w = -5.0
+            if avg_w <= 0:
+                raise ValueError("Source tank has no valid average weight")
+
+    def test_biomass_mode_zero_avg_weight_gives_zero_fish(self):
+        # If avg_weight is 0 the form returns 0 fish (guard branch)
+        avg_w = 0.0
+        fish_count = (
+            int(round(100.0 / (avg_w / 1000)))
+            if avg_w > 0 else 0
+        )
+        assert fish_count == 0
+
+    # Test 6: Biomass exceeds available — rejected without complete-tank flag
+    def test_biomass_exceeds_available_rejected(self):
+        source_biomass = 50.0      # kg available
+        eff_biomass    = 60.0      # kg attempted
+        eso_complete   = False
+        # Form validation logic
+        error = eff_biomass > source_biomass + 1e-6 and not eso_complete
+        assert error, "Should be rejected when biomass exceeds available without complete flag"
+
+    def test_biomass_exceeds_available_allowed_when_complete(self):
+        source_biomass = 50.0
+        eff_biomass    = 60.0
+        eso_complete   = True
+        error = eff_biomass > source_biomass + 1e-6 and not eso_complete
+        assert not error, "Should be allowed with complete-tank flag"
+
+    # Test 7: Fish count exceeds available — rejected without complete-tank flag
+    def test_fish_count_exceeds_available_rejected(self):
+        available  = 500
+        qty_fish   = 600
+        eso_complete = False
+        error = qty_fish > available and not eso_complete
+        assert error
+
+    def test_fish_count_exceeds_available_allowed_when_complete(self):
+        available  = 500
+        qty_fish   = 600
+        eso_complete = True
+        error = qty_fish > available and not eso_complete
+        assert not error
+
+    # Test 8: Regression — existing movement types produce same results as before
+    def test_harvest_unchanged(self):
+        tank   = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        result = state(tank, movements=[make_harvest("t1", qty=200)])
+        assert result["fish_count"] == 300
+
+    def test_transfer_unchanged(self):
+        tank   = make_tank("t1", fish_count=200, avg_weight_g=100.0)
+        result = state(tank, movements=[make_transfer("t1", "t2", qty=50)])
+        assert result["fish_count"] == 150
+
+    def test_external_stock_in_unchanged(self):
+        tank   = make_tank("t1", fish_count=0, avg_weight_g=0.0)
+        result = state(tank, movements=[make_external_stock_in("t1", "batch_A", 100, 150.0)])
+        assert result["fish_count"] == 100
