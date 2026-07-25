@@ -120,7 +120,7 @@ def _movement_type(move: dict) -> str:
     """
     raw = str(move.get("movement_type", "transfer") or "transfer").strip().lower()
     if raw in {"harvest", "harvest / slaughter", "harvest/slaughter",
-               "slaughter", "culling", "killing"}:
+               "slaughter", "culling", "killing", "external_stock_out"}:
         return "harvest"
     return "transfer"
 

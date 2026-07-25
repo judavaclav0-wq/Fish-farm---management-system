@@ -35,7 +35,7 @@ def render() -> None:
     with tab_new:
         movement_type = st.selectbox(
             "Movement type",
-            ["Transfer", "Harvest/Slaughter", "Killing", "External Stock In"],
+            ["Transfer", "Harvest/Slaughter", "Killing", "External Stock In", "External Stock Out"],
         )
 
         col1, col2 = st.columns(2)
@@ -211,6 +211,192 @@ def render() -> None:
                             st.success(
                                 f"External Stock In saved: {ext_qty_fish:,} fish "
                                 f"→ {ext_to_tank_name} from {ext_source.strip()}."
+                            )
+                            st.rerun()
+
+        # ── External Stock Out form ────────────────────────────────────────
+        elif movement_type == "External Stock Out":
+            eso_col1, eso_col2 = st.columns(2)
+            eso_from_system = eso_col1.selectbox(
+                "From system", system_names, key="eso_from_system"
+            )
+            eso_from_system_tanks = [
+                t for t in tanks if t.get("system_name", "—") == eso_from_system
+            ]
+            eso_from_tank_names = sorted([t["name"] for t in eso_from_system_tanks])
+            if not eso_from_tank_names:
+                st.warning("No tanks found in the selected system.")
+            else:
+                eso_from_tank_name = eso_col2.selectbox(
+                    "From tank", eso_from_tank_names, key="eso_from_tank"
+                )
+                eso_from_tank = next(
+                    (t for t in eso_from_system_tanks if t["name"] == eso_from_tank_name),
+                    None,
+                )
+
+                if eso_from_tank:
+                    eso_src_state = compute_tank_state(
+                        tank=eso_from_tank,
+                        batches=batches,
+                        daily_logs=daily_logs,
+                        movements=movements,
+                        adjustments=adjustments,
+                    )
+                    eso_fish    = eso_src_state.get("fish_count", 0)
+                    eso_biomass_cur = eso_src_state.get("biomass_kg", 0.0)
+                    eso_avg_w_cur = eso_src_state.get("avg_weight_g", 0.0)
+                    st.caption(
+                        f"**{eso_from_tank_name}** current stock: "
+                        f"{eso_fish:,} fish | {eso_biomass_cur:.1f} kg | {eso_avg_w_cur:.1f} g avg"
+                    )
+
+                    eso_batch_id   = eso_from_tank.get("batch_id", "")
+                    eso_batch_name = eso_from_tank.get("batch_name", "")
+                    if eso_batch_id or eso_batch_name:
+                        st.caption(f"Batch: **{eso_batch_name or eso_batch_id}**")
+
+                    eso_complete = st.checkbox(
+                        "Tank was completely emptied",
+                        key="eso_complete",
+                    )
+
+                    st.divider()
+
+                    eso_q1, eso_q2, eso_q3 = st.columns(3)
+                    eso_qty_fish = eso_q1.number_input(
+                        "Fish count",
+                        min_value=1,
+                        value=max(1, eso_fish) if eso_fish > 0 else 1,
+                        step=10,
+                        key="eso_qty_fish",
+                    )
+                    eso_avg_w = eso_q2.number_input(
+                        "Average weight (g)",
+                        min_value=0.1,
+                        value=max(0.1, float(eso_avg_w_cur)) if eso_avg_w_cur > 0 else 100.0,
+                        step=1.0,
+                        format="%.1f",
+                        key="eso_avg_w",
+                    )
+                    eso_biomass = round(float(eso_qty_fish) * float(eso_avg_w) / 1000, 3)
+                    eso_q3.metric("Biomass (kg)", f"{eso_biomass:.3f}")
+
+                    eso_destination = st.text_input(
+                        "External destination",
+                        placeholder="e.g. Processing plant, Another farm, Retailer…",
+                        key="eso_destination_input",
+                    )
+                    eso_notes = st.text_area("Notes", height=68, key="eso_notes")
+
+                    eso_submitted = st.button(
+                        "Save movement", type="primary", key="eso_save_btn"
+                    )
+
+                    if eso_submitted:
+                        eso_errors = []
+                        if not eso_from_tank:
+                            eso_errors.append("Select a source tank.")
+                        if int(eso_qty_fish) <= 0:
+                            eso_errors.append("Fish count must be greater than zero.")
+                        if float(eso_avg_w) <= 0:
+                            eso_errors.append("Average weight must be greater than zero.")
+                        if eso_biomass <= 0:
+                            eso_errors.append("Biomass must be greater than zero.")
+                        if not eso_destination.strip():
+                            eso_errors.append("External destination is required.")
+                        if not eso_complete and int(eso_qty_fish) > eso_fish:
+                            eso_errors.append(
+                                f"Cannot move {int(eso_qty_fish):,} fish — only "
+                                f"{eso_fish:,} available in {eso_from_tank_name}."
+                            )
+
+                        if eso_errors:
+                            for err in eso_errors:
+                                st.error(err)
+                        else:
+                            record = {
+                                "id":            storage.new_id("mv_"),
+                                "date":          str(mv_date),
+                                "movement_type": "external_stock_out",
+
+                                "from_system_name": eso_from_system,
+                                "from_tank_id":     eso_from_tank["id"],
+                                "from_tank_name":   eso_from_tank["name"],
+
+                                "to_system_name": "",
+                                "to_tank_id":     None,
+                                "to_tank_name":   "",
+
+                                "destination":            "",
+                                "external_destination":   eso_destination.strip(),
+                                "quantity_mode":          "fish",
+                                "quantity_fish":          int(eso_qty_fish),
+                                "quantity_kg":            float(eso_biomass),
+                                "avg_weight_g":           float(eso_avg_w),
+
+                                "batch_id":   eso_batch_id,
+                                "batch_name": eso_batch_name,
+
+                                "reason":      "",
+                                "operator":    mv_operator.strip(),
+                                "notes":       eso_notes.strip(),
+                                "tank_emptied": eso_complete,
+                            }
+
+                            storage.append_movement(record)
+
+                            # Complete-tank reconciliation: if the tank was declared empty,
+                            # create a variance adjustment to zero remaining fish.
+                            if eso_complete:
+                                remaining = eso_fish - int(eso_qty_fish)
+                                if remaining != 0:
+                                    adj_record = {
+                                        "id":             storage.new_id("adj_"),
+                                        "date":           str(mv_date),
+                                        "timestamp":      datetime.now().isoformat(),
+                                        "tank_id":        eso_from_tank["id"],
+                                        "tank_name":      eso_from_tank_name,
+                                        "system_name":    eso_from_system,
+                                        "batch_id":       eso_batch_id or "",
+                                        "batch_name":     eso_batch_name or "",
+                                        "expected_count": eso_fish,
+                                        "actual_count":   int(eso_qty_fish),
+                                        "variance":       -remaining,
+                                        "variance_pct":   round(
+                                            -remaining / eso_fish * 100, 2
+                                        ) if eso_fish > 0 else 0.0,
+                                        "note":           "Tank emptied reconciliation",
+                                        "movement_id":    record["id"],
+                                        "operator":       mv_operator.strip(),
+                                    }
+                                    storage.append_adjustment(adj_record)
+
+                            storage.log_activity(
+                                module="Movements",
+                                action="create",
+                                summary=(
+                                    f"External Stock Out: {int(eso_qty_fish):,} fish "
+                                    f"from {eso_from_tank_name} → {eso_destination.strip()}"
+                                ),
+                                date=str(mv_date),
+                                system_name=eso_from_system,
+                                tank_id=str(eso_from_tank.get("id", "")),
+                                tank_name=eso_from_tank_name,
+                                operator=mv_operator.strip(),
+                                details={
+                                    "quantity_fish":        int(eso_qty_fish),
+                                    "quantity_kg":          float(eso_biomass),
+                                    "avg_weight_g":         float(eso_avg_w),
+                                    "movement_type":        "external_stock_out",
+                                    "external_destination": eso_destination.strip(),
+                                    "tank_emptied":         eso_complete,
+                                },
+                            )
+
+                            st.success(
+                                f"External Stock Out saved: {int(eso_qty_fish):,} fish "
+                                f"from {eso_from_tank_name} → {eso_destination.strip()}."
                             )
                             st.rerun()
 
@@ -528,7 +714,7 @@ def render() -> None:
             "to_system_name", "to_tank_name",
             "quantity_fish", "quantity_kg",
             "avg_weight_g", "batch_name",
-            "external_source",
+            "external_source", "external_destination",
             "reason", "operator", "notes",
         ]
         present = [c for c in display_cols if c in df.columns]
@@ -584,12 +770,13 @@ def render() -> None:
         st.markdown("### Selected movement")
 
         _STORED_TO_DISPLAY = {
-            "transfer":          "Transfer",
-            "harvest":           "Harvest/Slaughter",
-            "killing":           "Killing",
-            "external_stock_in": "External Stock In",
+            "transfer":           "Transfer",
+            "harvest":            "Harvest/Slaughter",
+            "killing":            "Killing",
+            "external_stock_in":  "External Stock In",
+            "external_stock_out": "External Stock Out",
         }
-        _EDIT_TYPES = ["Transfer", "Harvest/Slaughter", "Killing", "External Stock In"]
+        _EDIT_TYPES = ["Transfer", "Harvest/Slaughter", "Killing", "External Stock In", "External Stock Out"]
 
         edit_type_default = _STORED_TO_DISPLAY.get(
             str(selected_move.get("movement_type", "transfer")).strip().lower(),
@@ -825,6 +1012,169 @@ def render() -> None:
                     date=selected_move.get("date", ""),
                     system_name=selected_move.get("to_system_name", ""),
                     tank_name=selected_move.get("to_tank_name", ""),
+                    details={"movement_id": selected_id},
+                )
+                st.success("Movement deleted.")
+                st.rerun()
+
+        # ── External Stock Out edit form ───────────────────────────────────
+        elif edit_type == "External Stock Out":
+            eso_ec1, eso_ec2 = st.columns(2)
+
+            eso_edit_system_default = selected_move.get("from_system_name") or system_names[0]
+            eso_edit_system_idx = (
+                system_names.index(eso_edit_system_default)
+                if eso_edit_system_default in system_names else 0
+            )
+            eso_edit_from_system = eso_ec1.selectbox(
+                "From system",
+                system_names,
+                index=eso_edit_system_idx,
+                key=f"eso_edit_from_system_{selected_id}",
+            )
+            eso_edit_from_system_tanks = [
+                t for t in tanks if t.get("system_name", "—") == eso_edit_from_system
+            ]
+            eso_edit_from_tank_names = sorted([t["name"] for t in eso_edit_from_system_tanks])
+
+            eso_from_tank_default = selected_move.get("from_tank_name")
+            eso_from_tank_idx = (
+                eso_edit_from_tank_names.index(eso_from_tank_default)
+                if eso_from_tank_default in eso_edit_from_tank_names else 0
+            )
+            eso_edit_from_tank_name = eso_ec2.selectbox(
+                "From tank",
+                eso_edit_from_tank_names,
+                index=eso_from_tank_idx,
+                key=f"eso_edit_from_tank_{selected_id}",
+            )
+            eso_edit_from_tank = next(
+                (t for t in eso_edit_from_system_tanks if t["name"] == eso_edit_from_tank_name),
+                None,
+            )
+
+            eso_eq1, eso_eq2, eso_eq3 = st.columns(3)
+            eso_edit_qty = eso_eq1.number_input(
+                "Fish count",
+                min_value=1,
+                value=max(1, int(selected_move.get("quantity_fish", 1))),
+                step=10,
+                key=f"eso_edit_qty_{selected_id}",
+            )
+            eso_edit_avg_w = eso_eq2.number_input(
+                "Average weight (g)",
+                min_value=0.1,
+                value=max(0.1, float(selected_move.get("avg_weight_g", 100.0))),
+                step=1.0,
+                format="%.1f",
+                key=f"eso_edit_avg_w_{selected_id}",
+            )
+            eso_edit_biomass = round(float(eso_edit_qty) * float(eso_edit_avg_w) / 1000, 3)
+            eso_eq3.metric("Biomass (kg)", f"{eso_edit_biomass:.3f}")
+
+            eso_edit_destination = st.text_input(
+                "External destination",
+                value=selected_move.get("external_destination", ""),
+                placeholder="e.g. Processing plant, Another farm, Retailer…",
+                key=f"eso_edit_destination_{selected_id}",
+            )
+            eso_edit_notes = st.text_area(
+                "Notes",
+                value=selected_move.get("notes", ""),
+                height=68,
+                key=f"eso_edit_notes_{selected_id}",
+            )
+
+            eso_col_save, eso_col_delete = st.columns(2)
+
+            if eso_col_save.button(
+                "Save changes", type="primary", key=f"save_movement_{selected_id}"
+            ):
+                eso_edit_errors = []
+                if not eso_edit_from_tank:
+                    eso_edit_errors.append("Select a source tank.")
+                if int(eso_edit_qty) <= 0:
+                    eso_edit_errors.append("Fish count must be greater than zero.")
+                if float(eso_edit_avg_w) <= 0:
+                    eso_edit_errors.append("Average weight must be greater than zero.")
+                if not eso_edit_destination.strip():
+                    eso_edit_errors.append("External destination is required.")
+
+                if eso_edit_errors:
+                    for err in eso_edit_errors:
+                        st.error(err)
+                else:
+                    eso_updated = {
+                        "id":            selected_id,
+                        "date":          str(edit_date),
+                        "movement_type": "external_stock_out",
+
+                        "from_system_name": eso_edit_from_system,
+                        "from_tank_id":     eso_edit_from_tank["id"] if eso_edit_from_tank else "",
+                        "from_tank_name":   eso_edit_from_tank_name,
+
+                        "to_system_name": "",
+                        "to_tank_id":     None,
+                        "to_tank_name":   "",
+
+                        "destination":            "",
+                        "external_destination":   eso_edit_destination.strip(),
+                        "quantity_mode":          "fish",
+                        "quantity_fish":          int(eso_edit_qty),
+                        "quantity_kg":            float(eso_edit_biomass),
+                        "avg_weight_g":           float(eso_edit_avg_w),
+
+                        "batch_id":   selected_move.get("batch_id", ""),
+                        "batch_name": selected_move.get("batch_name", ""),
+
+                        "reason":       "",
+                        "operator":     edit_operator.strip(),
+                        "notes":        eso_edit_notes.strip(),
+                        "tank_emptied": selected_move.get("tank_emptied", False),
+                    }
+
+                    updated_movements = [
+                        eso_updated if m.get("id") == selected_id else m
+                        for m in movements
+                    ]
+                    storage.save_movements(updated_movements)
+
+                    storage.log_activity(
+                        module="Movements",
+                        action="update",
+                        summary=(
+                            f"Updated External Stock Out: {eso_edit_qty:,} fish "
+                            f"from {eso_edit_from_tank_name} → {eso_edit_destination.strip()}"
+                        ),
+                        date=str(edit_date),
+                        system_name=eso_edit_from_system,
+                        tank_id=str(eso_edit_from_tank.get("id", "")) if eso_edit_from_tank else "",
+                        tank_name=eso_edit_from_tank_name,
+                        operator=edit_operator.strip(),
+                        details={"movement_id": selected_id},
+                    )
+                    st.success("Movement updated.")
+                    st.rerun()
+
+            if eso_col_delete.button(
+                "Delete movement", key=f"delete_movement_{selected_id}"
+            ):
+                updated_movements = [
+                    m for m in movements if m.get("id") != selected_id
+                ]
+                storage.save_movements(updated_movements)
+                storage.log_activity(
+                    module="Movements",
+                    action="delete",
+                    summary=(
+                        f"Deleted External Stock Out: "
+                        f"{selected_move.get('quantity_fish', 0):,} fish "
+                        f"from {selected_move.get('from_tank_name', '—')} "
+                        f"→ {selected_move.get('external_destination', '—')}"
+                    ),
+                    date=selected_move.get("date", ""),
+                    system_name=selected_move.get("from_system_name", ""),
+                    tank_name=selected_move.get("from_tank_name", ""),
                     details={"movement_id": selected_id},
                 )
                 st.success("Movement deleted.")

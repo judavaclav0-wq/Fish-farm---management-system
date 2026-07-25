@@ -426,3 +426,136 @@ class TestExternalStockIn:
         ]
         result = state(tank, movements=movements)
         assert result["fish_count"] == 0
+
+
+# ── External Stock Out ────────────────────────────────────────────────────────
+
+def make_external_stock_out(
+    from_tank_id: str,
+    qty: int,
+    avg_weight_g: float = 0.0,
+    date: str = "2026-01-02",
+    external_destination: str = "Test processor",
+) -> dict:
+    """Create an External Stock Out movement record (no destination tank)."""
+    return {
+        "id":                   "mv_eso",
+        "date":                 date,
+        "movement_type":        "external_stock_out",
+        "from_tank_id":         from_tank_id,
+        "from_tank_name":       f"QA-{from_tank_id}",
+        "to_tank_id":           None,
+        "to_tank_name":         "",
+        "quantity_fish":        qty,
+        "avg_weight_g":         avg_weight_g,
+        "external_destination": external_destination,
+    }
+
+
+class TestExternalStockOut:
+    """
+    External Stock Out: fish leave the farm to an external destination.
+    Behaves identically to Harvest at the engine level: source stock is
+    reduced, no destination tank is affected.
+    """
+
+    # 1. Basic partial removal
+    def test_partial_removal_fish_count(self):
+        tank   = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=200)])
+        assert result["fish_count"] == 300
+
+    # 2. Full tank removal
+    def test_full_removal_empties_tank(self):
+        tank   = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=500)])
+        assert result["fish_count"] == 0
+        assert result["biomass_kg"] == 0.0
+        assert result["avg_weight_g"] == 0.0
+
+    # 3. No destination tank is affected
+    def test_no_destination_tank_modified(self):
+        src  = make_tank("t_src",  fish_count=500, avg_weight_g=200.0)
+        dest = make_tank("t_dest", fish_count=100, avg_weight_g=100.0)
+        m    = make_external_stock_out("t_src", qty=200)
+
+        s_dest = state(dest, movements=[m])
+        assert s_dest["fish_count"] == 100, "Destination must not be affected"
+
+    # 4. Biomass is correctly reduced proportionally
+    def test_biomass_after_partial_removal(self):
+        # 500 fish @ 200 g = 100 kg; remove 200 fish → 300 @ 200 g = 60 kg
+        tank   = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=200, avg_weight_g=200.0)])
+        assert approx(result["biomass_kg"], 60.0, tol=0.5)
+
+    # 5. avg_weight_g is unchanged after partial removal
+    def test_avg_weight_unchanged_after_removal(self):
+        tank   = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=200, avg_weight_g=200.0)])
+        assert approx(result["avg_weight_g"], 200.0, tol=1.0)
+
+    # 6. Over-removal is clamped to zero (not negative)
+    def test_over_removal_clamped_to_zero(self):
+        tank   = make_tank("t1", fish_count=100, avg_weight_g=150.0)
+        result = state(tank, movements=[make_external_stock_out("t1", qty=9999)])
+        assert result["fish_count"] >= 0
+        assert result["biomass_kg"] >= 0.0
+
+    # 7. Unrelated tank is not affected
+    def test_unrelated_tank_unaffected(self):
+        tank_a = make_tank("t_a", fish_count=400, avg_weight_g=150.0)
+        tank_b = make_tank("t_b", fish_count=200, avg_weight_g=100.0)
+        m      = make_external_stock_out("t_a", qty=100)
+
+        result_b = state(tank_b, movements=[m])
+        assert result_b["fish_count"] == 200
+
+    # 8. Stacks correctly with other movement types
+    def test_stacks_with_transfer_in(self):
+        # Tank starts with 100; receives 200 from transfer; sends 50 out externally
+        tank = make_tank("t1", fish_count=100, avg_weight_g=100.0)
+        movements = [
+            make_transfer("src", "t1", qty=200, avg_weight_g=100.0, date="2026-01-01"),
+            make_external_stock_out("t1", qty=50, date="2026-01-02"),
+        ]
+        result = state(tank, movements=movements)
+        assert result["fish_count"] == 250
+
+    # 9. Stacks correctly with harvest
+    def test_stacks_with_harvest(self):
+        tank = make_tank("t1", fish_count=500, avg_weight_g=200.0)
+        movements = [
+            make_harvest("t1", qty=100, date="2026-01-01"),
+            make_external_stock_out("t1", qty=100, date="2026-01-02"),
+        ]
+        result = state(tank, movements=movements)
+        assert result["fish_count"] == 300
+
+    # 10. Chronological ordering is respected
+    def test_chronological_ordering(self):
+        # External out happens BEFORE the transfer in (by date).
+        # t1 starts with 200; external_out 200 on Jan-01 → 0 fish;
+        # then transfer 100 into t1 on Jan-02 → 100 fish.
+        tank = make_tank("t1", fish_count=200, avg_weight_g=100.0)
+        movements = [
+            make_external_stock_out("t1", qty=200, date="2026-01-01"),
+            make_transfer("src", "t1", qty=100, avg_weight_g=100.0, date="2026-01-02"),
+        ]
+        result = state(tank, movements=movements)
+        assert result["fish_count"] == 100
+
+    # 11. _movement_type normalises external_stock_out to "harvest"
+    def test_movement_type_normalised_to_harvest(self):
+        from core.stock_engine import _movement_type
+        m = {"movement_type": "external_stock_out"}
+        assert _movement_type(m) == "harvest"
+
+    # 12. Mortality + external_stock_out in same period
+    def test_mortality_and_external_stock_out(self):
+        # 500 fish; 50 mortality on Jan-01; 200 external_out on Jan-02 → 250
+        tank = make_tank("t1", fish_count=500, avg_weight_g=150.0)
+        logs = [make_daily_log("t1", mortality=50, date="2026-01-01")]
+        movements = [make_external_stock_out("t1", qty=200, date="2026-01-02")]
+        result = compute_tank_state(tank, [], movements=movements, daily_logs=logs)
+        assert result["fish_count"] == 250
