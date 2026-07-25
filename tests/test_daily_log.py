@@ -412,3 +412,145 @@ class TestNormalizeEmptyTank:
         result = normalize_empty_tank(tank)
         assert result["fish_count"] == 1000
         assert result["biomass_kg"] == 150.0
+
+
+# ── Regression: stock adjustment pass-through ─────────────────────────────────
+
+class TestStockAdjustmentPassThrough:
+    """
+    Focused regression tests for the confirmed root cause:
+    Daily Log was not passing stock adjustments to compute_farm_state(), causing
+    it to show different fish counts than the Dashboard for tanks with count
+    reconciliation records.
+    """
+
+    def _farm_with_tank(self, tid, fish_count, avg_weight_g=100.0):
+        tank = {
+            "id": tid, "name": f"T_{tid}",
+            "system_id": "sys_M02", "system_name": "M02",
+            "fish_count": float(fish_count),
+            "avg_weight_g": avg_weight_g,
+            "biomass_kg": round(fish_count * avg_weight_g / 1000.0, 3),
+            "tank_volume_m3": 50.0,
+        }
+        return {
+            "systems": [{"id": "sys_M02", "name": "M02", "type": "Growout", "tanks": [tank]}],
+            "tanks": [],
+        }
+
+    def _mv_in(self, tid, qty):
+        return {"id": "mv_in", "date": "2025-01-01", "movement_type": "external_stock_in",
+                "from_tank_id": "", "to_tank_id": tid, "quantity_fish": qty, "avg_weight_g": 0.0}
+
+    def _mv_out(self, tid, qty):
+        return {"id": "mv_out", "date": "2025-01-02", "movement_type": "transfer",
+                "from_tank_id": tid, "to_tank_id": "other", "quantity_fish": qty, "avg_weight_g": 0.0}
+
+    def _mortality(self, tid, mort):
+        return {"date": "2025-01-03", "system_name": "M02", "tank_id": tid,
+                "tank_name": f"T_{tid}", "mortality_fish": mort, "feed_kg": 0.0, "oxygen": 0.0}
+
+    def _adj(self, tid, variance):
+        return {"id": "adj1", "date": "2025-01-01", "tank_id": tid, "variance": variance}
+
+    # ── Test 1 ────────────────────────────────────────────────────────────────
+    def test_compute_farm_state_accepts_adjustments_kwarg(self):
+        """compute_farm_state must accept an adjustments keyword argument."""
+        farm = self._farm_with_tank("t1", 1000)
+        # Must not raise; adjustments kwarg must be supported.
+        states = compute_farm_state(
+            farm, [], [], [], adjustments=[self._adj("t1", 100)]
+        )
+        assert len(states) == 1
+
+    # ── Test 2 ────────────────────────────────────────────────────────────────
+    def test_tank_2_09_fixture_returns_1346_with_adjustment(self):
+        """
+        Exact tank 2.09 production scenario.
+        base=841, +1346 in, -2194 out, -10 mortality, +1363 adjustment.
+        Without adjustment: 841+1346-2194-10 = -17 → 0  (the bug).
+        With adjustment: -17+1363 = 1346                (correct).
+        """
+        farm = self._farm_with_tank("t_2_09", 841)
+        mvs  = [self._mv_in("t_2_09", 1346), self._mv_out("t_2_09", 2194)]
+        dl   = [self._mortality("t_2_09", 10)]
+        adj  = [self._adj("t_2_09", 1363)]
+
+        # Without adjustment — replicates the old Daily Log behaviour.
+        states_no_adj = compute_farm_state(farm, [], dl, mvs)
+        s_no_adj = next(st for st in states_no_adj if st["tank_id"] == "t_2_09")
+        assert get_tank_fish_count(s_no_adj) == 0, "baseline without adj must be 0"
+
+        # With adjustment — replicates the Dashboard / corrected Daily Log behaviour.
+        states_adj = compute_farm_state(farm, [], dl, mvs, adjustments=adj)
+        s_adj = next(st for st in states_adj if st["tank_id"] == "t_2_09")
+        assert get_tank_fish_count(s_adj) == 1346, "with adj must be 1346"
+        assert is_tank_occupied(s_adj), "tank must be occupied with 1346 fish"
+
+    # ── Test 3 ────────────────────────────────────────────────────────────────
+    def test_positive_stock_adjustment_increases_fish_count(self):
+        """A positive variance increases the computed fish_count."""
+        farm = self._farm_with_tank("t1", 1000)
+        mv   = self._mv_out("t1", 800)     # raw = 1000 - 800 = 200
+        adj  = self._adj("t1", +300)        # with adj = 200 + 300 = 500
+
+        states = compute_farm_state(farm, [], [], [mv], adjustments=[adj])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 500
+
+    # ── Test 4 ────────────────────────────────────────────────────────────────
+    def test_negative_stock_adjustment_decreases_fish_count(self):
+        """A negative variance decreases the computed fish_count."""
+        farm = self._farm_with_tank("t1", 1000)
+        adj  = self._adj("t1", -200)        # raw = 1000 - 200 = 800
+
+        states = compute_farm_state(farm, [], [], [], adjustments=[adj])
+        s = next(st for st in states if st["tank_id"] == "t1")
+        assert get_tank_fish_count(s) == 800
+
+    # ── Test 5 ────────────────────────────────────────────────────────────────
+    def test_dashboard_and_daily_log_same_result_with_same_inputs(self):
+        """
+        When Dashboard and Daily Log both pass adjustments, they produce
+        identical fish_counts for every tank.
+        """
+        farm = self._farm_with_tank("t1", 841)
+        mvs  = [self._mv_in("t1", 1346), self._mv_out("t1", 2194)]
+        dl   = [self._mortality("t1", 10)]
+        adj  = [self._adj("t1", 1363)]
+
+        dashboard  = compute_farm_state(farm, [], dl, mvs, adjustments=adj)
+        daily_log  = compute_farm_state(farm, [], dl, mvs, adjustments=adj)
+
+        d = next(st for st in dashboard if st["tank_id"] == "t1")
+        l = next(st for st in daily_log  if st["tank_id"] == "t1")
+        assert get_tank_fish_count(d) == get_tank_fish_count(l)
+
+    # ── Test 6 ────────────────────────────────────────────────────────────────
+    def test_occupancy_uses_fish_count_consistently(self):
+        """
+        is_tank_occupied and get_tank_fish_count must agree with each other.
+        Occupied ↔ fish_count > 0.  Neither biomass nor batch_id changes the verdict.
+        """
+        farm_occ   = self._farm_with_tank("t1", 500)
+        farm_empty = self._farm_with_tank("t2", 0)
+
+        s_occ   = compute_farm_state(farm_occ, [], [], [])[0]
+        s_empty = compute_farm_state(farm_empty, [], [], [])[0]
+
+        assert get_tank_fish_count(s_occ) > 0 and is_tank_occupied(s_occ)
+        assert get_tank_fish_count(s_empty) == 0 and not is_tank_occupied(s_empty)
+
+    # ── Test 7 ────────────────────────────────────────────────────────────────
+    def test_no_debug_diagnostics_in_daily_log_render_source(self):
+        """
+        The temporary debug expander must not be present in the deployed render()
+        function source code.
+        """
+        import inspect
+        from modules.daily_log import render
+        src = inspect.getsource(render)
+        assert "Debug: tank occupancy diagnostics" not in src, (
+            "debug expander must be removed before release"
+        )
+        assert "🔍" not in src, "debug emoji must be removed"

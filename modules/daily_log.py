@@ -202,12 +202,15 @@ def _system_measurements_from_logs(entries: list[dict]) -> dict:
 def render() -> None:
     st.header("Daily report")
 
-    farm      = storage.load_farm()
-    batches   = storage.load_batches()
-    logs      = storage.load_daily_logs()
-    movements = storage.load_movements()
+    farm        = storage.load_farm()
+    batches     = storage.load_batches()
+    logs        = storage.load_daily_logs()
+    movements   = storage.load_movements()
+    adjustments = storage.load_adjustments()
 
-    tank_states = compute_farm_state(farm, batches, logs, movements)
+    tank_states = compute_farm_state(
+        farm, batches, logs, movements, adjustments=adjustments
+    )
 
     if not tank_states:
         st.warning("No tanks defined. Go to **Farm Setup** first.")
@@ -332,33 +335,6 @@ def render() -> None:
 
         st.divider()
 
-        # ── DEBUG: per-tank diagnostic expander (temporary — remove before release) ──
-        with st.expander("🔍 Debug: tank occupancy diagnostics", expanded=False):
-            sys_obj = next(
-                (s for s in farm.get("systems", []) if s.get("name") == selected_system), {}
-            )
-            st.write(f"**System:** {selected_system}  |  ID: `{sys_obj.get('id', '—')}`")
-            debug_rows = []
-            for s in visible_tanks:
-                tid      = s["tank_id"]
-                ex       = existing_by_tank.get(tid, {})
-                occupied = is_tank_occupied(s)
-                debug_rows.append({
-                    "tank_name":       s.get("tank_name", "—"),
-                    "tank_id":         tid,
-                    "base_fish":       s.get("base_fish_count", "?"),
-                    "moved_in":        s.get("moved_in_fish", 0),
-                    "moved_out":       s.get("moved_out_fish", 0),
-                    "mortality":       s.get("total_mortality", 0),
-                    "fish_count":      s.get("fish_count", 0),
-                    "is_occupied":     occupied,
-                    "ex_mortality":    ex.get("mortality_fish", "—"),
-                    "o2_key":          f"o2_{tid}_{log_date_str}",
-                    "mort_key":        f"mort_{tid}_{log_date_str}",
-                    "mort_enabled":    occupied,
-                })
-            st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
-
         # ── Per-tank entries ───────────────────────────────────────────────
         tank_entries = []
 
@@ -458,8 +434,10 @@ def render() -> None:
                 latest_batches   = storage.load_batches()
                 latest_logs      = storage.load_daily_logs()
                 latest_movements = storage.load_movements()
+                latest_adj       = storage.load_adjustments()
                 latest_states    = compute_farm_state(
-                    latest_farm, latest_batches, latest_logs, latest_movements
+                    latest_farm, latest_batches, latest_logs, latest_movements,
+                    adjustments=latest_adj,
                 )
                 latest_state_map = {s["tank_id"]: s for s in latest_states}
 
@@ -505,7 +483,7 @@ def render() -> None:
         if col_pdf.button("Generate PDF"):
             states_today = compute_farm_state(
                 farm, batches, logs + tank_entries, movements,
-                as_of_date=log_date_str,
+                as_of_date=log_date_str, adjustments=adjustments,
             )
 
             chemicals = {
@@ -799,7 +777,7 @@ def render() -> None:
         if col_pdf.button("Generate historical PDF"):
             states_selected_date = compute_farm_state(
                 farm, batches, logs, movements,
-                as_of_date=selected_date,
+                as_of_date=selected_date, adjustments=adjustments,
             )
 
             hist_chemicals = {
