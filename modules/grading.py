@@ -539,6 +539,17 @@ def render() -> None:
         )
 
         rec         = filtered_records[selected_rec_idx]
+
+        # Stable identity key for this record — used to scope every edit-form
+        # widget key so that when the selected record changes, Streamlit creates
+        # fresh widgets initialised from the new record's values instead of
+        # retaining stale session-state from the previous record.
+        _rec_key = rec.get("id") or (
+            f"{rec.get('date', '')}"
+            f"__{rec.get('system_name', '')}"
+            f"__{rec.get('tank_id') or rec.get('tank_name', '')}"
+        )
+
         weights_raw = rec.get("weights") or rec.get("weights_g") or []
         small_thr   = rec.get("small_threshold_g",   0)
         harvest_thr = rec.get("harvest_threshold_g", 0)
@@ -612,7 +623,7 @@ def render() -> None:
         except ValueError:
             edit_date_default = date.today()
 
-        edit_date = st.date_input("Date", value=edit_date_default, key="hist_edit_date")
+        edit_date = st.date_input("Date", value=edit_date_default, key=f"hist_edit_date_{_rec_key}")
 
         all_system_names = sorted({s.get("system_name", "—") for s in tank_states})
         edit_system_idx  = (
@@ -621,7 +632,7 @@ def render() -> None:
             else 0
         )
         edit_system = st.selectbox(
-            "Unit", all_system_names, index=edit_system_idx, key="hist_edit_system"
+            "Unit", all_system_names, index=edit_system_idx, key=f"hist_edit_system_{_rec_key}"
         )
 
         edit_system_tanks = [s for s in tank_states if s.get("system_name") == edit_system]
@@ -632,7 +643,7 @@ def render() -> None:
             else 0
         )
         edit_tank = st.selectbox(
-            "Tank", edit_tank_names, index=edit_tank_idx, key="hist_edit_tank"
+            "Tank", edit_tank_names, index=edit_tank_idx, key=f"hist_edit_tank_{_rec_key}"
         )
 
         edit_tank_state = next(
@@ -647,7 +658,7 @@ def render() -> None:
             value=float(rec.get("small_threshold_g") or 50.0),
             step=1.0,
             format="%.1f",
-            key="hist_edit_small_thr",
+            key=f"hist_edit_small_thr_{_rec_key}",
         )
         edit_harvest_thr = ec2.number_input(
             "Harvest-ready threshold (g)",
@@ -655,21 +666,21 @@ def render() -> None:
             value=float(rec.get("harvest_threshold_g") or 300.0),
             step=5.0,
             format="%.1f",
-            key="hist_edit_harvest_thr",
+            key=f"hist_edit_harvest_thr_{_rec_key}",
         )
 
         edit_operator = st.text_input(
-            "Operator", value=rec.get("operator", ""), key="hist_edit_operator"
+            "Operator", value=rec.get("operator", ""), key=f"hist_edit_operator_{_rec_key}"
         )
         edit_notes = st.text_area(
-            "Notes", value=rec.get("notes", ""), key="hist_edit_notes"
+            "Notes", value=rec.get("notes", ""), key=f"hist_edit_notes_{_rec_key}"
         )
 
         edit_raw_weights = st.text_area(
             "Weights (g) — edit or replace values",
             value=", ".join(str(w) for w in weights_raw),
             height=120,
-            key="hist_edit_weights",
+            key=f"hist_edit_weights_{_rec_key}",
         )
 
         edit_weights = _parse_weights(edit_raw_weights) if edit_raw_weights.strip() else []
