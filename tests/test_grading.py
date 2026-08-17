@@ -6,7 +6,7 @@ logic.  All tests use in-memory data only — no Supabase, no Streamlit.
 """
 
 import pytest
-from modules.grading import _parse_weights, _analyse, _ensure_pcts
+from modules.grading import _parse_weights, _analyse, _ensure_pcts, _resolve_record, _matches_record
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -255,3 +255,73 @@ class TestParseWeightsRoundTrip:
         text = ", ".join(str(w) for w in original)
         parsed = _parse_weights(text)
         assert parsed == original
+
+
+# ── _resolve_record / _matches_record ────────────────────────────────────────
+
+class TestResolveRecord:
+    """Tests for _resolve_record: selects the right histogram record given
+    system_name + tank_name + optional date_filter."""
+
+    def setup_method(self):
+        self.rec_jan = make_record(
+            "2026-01-10", "M01", "Tank-14", "t_14",
+            weights=[100, 200, 300], rec_id="grd_jan",
+        )
+        self.rec_feb = make_record(
+            "2026-02-10", "M01", "Tank-14", "t_14",
+            weights=[110, 210, 310], rec_id="grd_feb",
+        )
+        self.rec_other_tank = make_record(
+            "2026-01-10", "M01", "Tank-15", "t_15",
+            weights=[400, 500], rec_id="grd_other",
+        )
+        self.logs = [self.rec_jan, self.rec_feb, self.rec_other_tank]
+
+    def test_returns_none_when_no_match(self):
+        result = _resolve_record(self.logs, "M01", "Tank-99")
+        assert result is None
+
+    def test_returns_single_record_when_only_one_exists(self):
+        result = _resolve_record(self.logs, "M01", "Tank-15")
+        assert result is not None
+        assert result["weights"] == [400, 500]
+
+    def test_returns_most_recent_when_no_date_filter(self):
+        result = _resolve_record(self.logs, "M01", "Tank-14")
+        assert result is not None
+        assert result["date"] == "2026-02-10", "Expected most recent record when no date pinned"
+
+    def test_returns_date_matched_record_when_date_filter_set(self):
+        result = _resolve_record(self.logs, "M01", "Tank-14", date_filter="2026-01-10")
+        assert result is not None
+        assert result["date"] == "2026-01-10"
+        assert result["weights"] == [100, 200, 300]
+
+    def test_falls_back_to_most_recent_when_date_filter_not_found(self):
+        result = _resolve_record(self.logs, "M01", "Tank-14", date_filter="2025-12-01")
+        assert result is not None
+        assert result["date"] == "2026-02-10", "Should fall back to most recent when date not found"
+
+
+class TestMatchesRecord:
+    """Tests for _matches_record: identity check used in save/delete loops."""
+
+    def setup_method(self):
+        self.rec = make_record(
+            "2026-01-20", "M01", "Tank-14", "t_14",
+            weights=[100, 200], rec_id="grd_match",
+        )
+
+    def test_matches_by_tank_id(self):
+        assert _matches_record(self.rec, "2026-01-20", "t_14", "Tank-14")
+
+    def test_matches_by_tank_name_when_no_tank_id(self):
+        rec_no_id = {**self.rec, "tank_id": ""}
+        assert _matches_record(rec_no_id, "2026-01-20", "", "Tank-14")
+
+    def test_does_not_match_different_date(self):
+        assert not _matches_record(self.rec, "2026-01-21", "t_14", "Tank-14")
+
+    def test_does_not_match_different_tank_id(self):
+        assert not _matches_record(self.rec, "2026-01-20", "t_99", "Tank-99")

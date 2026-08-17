@@ -245,6 +245,51 @@ def _generate_histogram_pdf(
     return buffer
 
 
+# ── Record resolution ────────────────────────────────────────────────────────
+
+def _resolve_record(
+    grading_logs: list,
+    system_name: str,
+    tank_name: str,
+    date_filter: str | None = None,
+) -> dict | None:
+    """Return the single histogram record for unit + tank + optional date.
+
+    When date_filter is None and multiple records exist, the most-recent record
+    is returned.  Returns None when the unit/tank has no records.
+    """
+    tank_records = [
+        _ensure_pcts(r)
+        for r in grading_logs
+        if r.get("system_name") == system_name
+        and r.get("tank_name")  == tank_name
+    ]
+    if not tank_records:
+        return None
+    if date_filter is not None:
+        date_matched = [r for r in tank_records if r.get("date") == date_filter]
+        if date_matched:
+            return date_matched[0]
+        # Fallback to most recent when the stored date_filter is stale
+        return sorted(tank_records, key=lambda r: r.get("date", ""), reverse=True)[0]
+    if len(tank_records) == 1:
+        return tank_records[0]
+    return sorted(tank_records, key=lambda r: r.get("date", ""), reverse=True)[0]
+
+
+# ── Save / delete matching ────────────────────────────────────────────────────
+
+def _matches_record(existing: dict, original_date: str, original_tank_id: str, original_tank_nm: str) -> bool:
+    """True when `existing` is the record identified by date + tank."""
+    return (
+        existing.get("date") == original_date
+        and (
+            (existing.get("tank_id") and existing.get("tank_id") == original_tank_id)
+            or existing.get("tank_name") == original_tank_nm
+        )
+    )
+
+
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render() -> None:
@@ -458,7 +503,10 @@ def render() -> None:
 
         df_all = pd.DataFrame(grading_logs)
 
-        # ── Filters ───────────────────────────────────────────────────────────
+        # ── Filters — drive both the summary table and the edit form ──────────
+        # Unit → Tank → Date acts as the record-selection hierarchy.
+        # Selecting a specific Unit + Tank is required before the edit form
+        # appears.  The Date filter resolves one record when multiple exist.
         col_f1, col_f2, col_f3 = st.columns(3)
 
         systems_h       = ["All"] + sorted(df_all["system_name"].dropna().unique().tolist())
@@ -511,39 +559,40 @@ def render() -> None:
         st.divider()
         st.subheader("Record detail")
 
-        if df_filtered.empty:
-            st.info("No records match the selected filters.")
+        # Guard: require a specific Unit + Tank to be selected before editing.
+        if filter_system_h == "All" or filter_tank_h == "All":
+            st.info(
+                "Select a specific **Unit** and **Tank** above to view "
+                "and edit a record."
+            )
             return
 
-        # Rebuild filtered list from source data (not DataFrame) so we keep
-        # the raw weights list intact.
-        filtered_records = [
-            _ensure_pcts(r)
-            for r in grading_logs
-            if (filter_system_h == "All" or r.get("system_name") == filter_system_h)
-            and (filter_tank_h   == "All" or r.get("tank_name")   == filter_tank_h)
-            and (filter_date_h   == "All" or r.get("date")        == filter_date_h)
-        ]
+        # Resolve the record for the selected Unit + Tank (+ optional Date).
+        # _resolve_record picks the most-recent record when date is not pinned.
+        date_pin = filter_date_h if filter_date_h != "All" else None
+        rec = _resolve_record(grading_logs, filter_system_h, filter_tank_h, date_pin)
 
-        rec_labels = [
-            f"{r.get('date')}  ·  {r.get('system_name')}  ·  "
-            f"{r.get('tank_name')}  ({r.get('sample_count', '?')} samples)"
-            for r in filtered_records
-        ]
+        if rec is None:
+            st.info(
+                f"No histogram records for **{filter_system_h}** / **{filter_tank_h}**."
+            )
+            return
 
-        selected_rec_idx = st.selectbox(
-            "Select record",
-            range(len(filtered_records)),
-            format_func=lambda i: rec_labels[i],
-            key="hist_detail_select",
+        # When multiple dates exist and none is pinned, notify the user.
+        tank_record_count = sum(
+            1 for r in grading_logs
+            if r.get("system_name") == filter_system_h
+            and r.get("tank_name")  == filter_tank_h
         )
+        if tank_record_count > 1 and date_pin is None:
+            st.caption(
+                f"Multiple records for this tank — showing most recent "
+                f"(**{rec.get('date', '—')}**). "
+                "Use the **Date** filter above to select a specific record."
+            )
 
-        rec         = filtered_records[selected_rec_idx]
-
-        # Stable identity key for this record — used to scope every edit-form
-        # widget key so that when the selected record changes, Streamlit creates
-        # fresh widgets initialised from the new record's values instead of
-        # retaining stale session-state from the previous record.
+        # Stable widget-key scoped to this record so that switching Unit/Tank/Date
+        # forces Streamlit to create fresh widgets from the new record's values.
         _rec_key = rec.get("id") or (
             f"{rec.get('date', '')}"
             f"__{rec.get('system_name', '')}"
@@ -615,40 +664,22 @@ def render() -> None:
             st.caption("No raw weights stored — PDF cannot be generated for this record.")
 
         # ── Edit form ─────────────────────────────────────────────────────────
+        # Unit and Tank are now record selectors (the filters above), not
+        # editable assignment fields.  Only data fields are editable here.
         st.divider()
         st.subheader("Edit record")
+        st.caption(
+            f"**Editing:** {rec.get('system_name', '—')} / "
+            f"{rec.get('tank_name', '—')} / {rec.get('date', '—')}"
+        )
 
         try:
             edit_date_default = date.fromisoformat(rec.get("date", str(date.today())))
         except ValueError:
             edit_date_default = date.today()
 
-        edit_date = st.date_input("Date", value=edit_date_default, key=f"hist_edit_date_{_rec_key}")
-
-        all_system_names = sorted({s.get("system_name", "—") for s in tank_states})
-        edit_system_idx  = (
-            all_system_names.index(rec.get("system_name"))
-            if rec.get("system_name") in all_system_names
-            else 0
-        )
-        edit_system = st.selectbox(
-            "Unit", all_system_names, index=edit_system_idx, key=f"hist_edit_system_{_rec_key}"
-        )
-
-        edit_system_tanks = [s for s in tank_states if s.get("system_name") == edit_system]
-        edit_tank_names   = [s.get("tank_name", "—") for s in edit_system_tanks]
-        edit_tank_idx     = (
-            edit_tank_names.index(rec.get("tank_name"))
-            if rec.get("tank_name") in edit_tank_names
-            else 0
-        )
-        edit_tank = st.selectbox(
-            "Tank", edit_tank_names, index=edit_tank_idx, key=f"hist_edit_tank_{_rec_key}"
-        )
-
-        edit_tank_state = next(
-            (s for s in edit_system_tanks if s.get("tank_name") == edit_tank),
-            {},
+        edit_date = st.date_input(
+            "Date", value=edit_date_default, key=f"hist_edit_date_{_rec_key}"
         )
 
         ec1, ec2 = st.columns(2)
@@ -670,10 +701,12 @@ def render() -> None:
         )
 
         edit_operator = st.text_input(
-            "Operator", value=rec.get("operator", ""), key=f"hist_edit_operator_{_rec_key}"
+            "Operator", value=rec.get("operator", ""),
+            key=f"hist_edit_operator_{_rec_key}"
         )
         edit_notes = st.text_area(
-            "Notes", value=rec.get("notes", ""), key=f"hist_edit_notes_{_rec_key}"
+            "Notes", value=rec.get("notes", ""),
+            key=f"hist_edit_notes_{_rec_key}"
         )
 
         edit_raw_weights = st.text_area(
@@ -705,12 +738,14 @@ def render() -> None:
             if not edit_weights:
                 st.error("Cannot save — no valid weights entered.")
             else:
+                # Unit and Tank are frozen from the original record —
+                # editing does not move a histogram to a different tank.
                 updated_record = {
                     "date":                str(edit_date),
                     "farm_name":           rec.get("farm_name", farm_name),
-                    "system_name":         edit_system,
-                    "tank_id":             edit_tank_state.get("tank_id", rec.get("tank_id", "")),
-                    "tank_name":           edit_tank,
+                    "system_name":         rec.get("system_name"),
+                    "tank_id":             rec.get("tank_id", ""),
+                    "tank_name":           rec.get("tank_name", ""),
                     "operator":            edit_operator.strip(),
                     "notes":               edit_notes.strip(),
                     "sample_count":        edit_result["sample_count"],
@@ -728,7 +763,6 @@ def render() -> None:
                     "weights":             edit_weights,
                 }
 
-                # Replace the first matching record (match on original date + tank)
                 original_date    = rec.get("date")
                 original_tank_id = rec.get("tank_id")
                 original_tank_nm = rec.get("tank_name")
@@ -736,13 +770,8 @@ def render() -> None:
                 replaced = False
                 new_logs = []
                 for existing in grading_logs:
-                    if (
-                        not replaced
-                        and existing.get("date") == original_date
-                        and (
-                            (existing.get("tank_id") and existing.get("tank_id") == original_tank_id)
-                            or existing.get("tank_name") == original_tank_nm
-                        )
+                    if not replaced and _matches_record(
+                        existing, original_date, original_tank_id, original_tank_nm
                     ):
                         new_logs.append(updated_record)
                         replaced = True
@@ -754,13 +783,13 @@ def render() -> None:
                     module="Histograms",
                     action="update",
                     summary=(
-                        f"Updated histogram for tank {edit_tank}, "
+                        f"Updated histogram for tank {rec.get('tank_name', '')}, "
                         f"date {str(edit_date)}"
                     ),
                     date=str(edit_date),
-                    system_name=edit_system,
-                    tank_id=str(edit_tank_state.get("tank_id", "")),
-                    tank_name=edit_tank,
+                    system_name=rec.get("system_name", ""),
+                    tank_id=str(rec.get("tank_id", "")),
+                    tank_name=rec.get("tank_name", ""),
                     operator=edit_operator.strip(),
                 )
                 st.success("Record updated.")
@@ -774,15 +803,10 @@ def render() -> None:
             removed = False
             new_logs = []
             for existing in grading_logs:
-                if (
-                    not removed
-                    and existing.get("date") == original_date
-                    and (
-                        (existing.get("tank_id") and existing.get("tank_id") == original_tank_id)
-                        or existing.get("tank_name") == original_tank_nm
-                    )
+                if not removed and _matches_record(
+                    existing, original_date, original_tank_id, original_tank_nm
                 ):
-                    removed = True  # skip this record = delete it
+                    removed = True  # skip = delete
                 else:
                     new_logs.append(existing)
 
