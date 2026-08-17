@@ -14,12 +14,13 @@ from core.stock_engine import get_all_tanks, compute_tank_state
 def render() -> None:
     st.header("Fish Movements")
 
-    farm        = storage.load_farm()
-    tanks       = get_all_tanks(farm)
-    batches     = storage.load_batches()
-    daily_logs  = storage.load_daily_logs()
-    movements   = storage.load_movements()
-    adjustments = storage.load_adjustments()
+    farm         = storage.load_farm()
+    tanks        = get_all_tanks(farm)
+    batches      = storage.load_batches()
+    daily_logs   = storage.load_daily_logs()
+    movements    = storage.load_movements()
+    adjustments  = storage.load_adjustments()
+    grading_logs = storage.load_grading_logs()
 
     if not tanks:
         st.warning("At least one tank is needed to record a movement.")
@@ -70,6 +71,7 @@ def render() -> None:
                         daily_logs=daily_logs,
                         movements=movements,
                         adjustments=adjustments,
+                        grading_logs=grading_logs,
                     )
                     d_fish    = dest_state.get("fish_count", 0)
                     d_biomass = dest_state.get("biomass_kg", 0.0)
@@ -242,6 +244,7 @@ def render() -> None:
                         daily_logs=daily_logs,
                         movements=movements,
                         adjustments=adjustments,
+                        grading_logs=grading_logs,
                     )
                     eso_fish        = eso_src_state.get("fish_count", 0)
                     eso_biomass_cur = eso_src_state.get("biomass_kg", 0.0)
@@ -455,6 +458,7 @@ def render() -> None:
                 daily_logs=daily_logs,
                 movements=movements,
                 adjustments=adjustments,
+                grading_logs=grading_logs,
             )
 
             current_fish    = src_state.get("fish_count", 0)   if src_state else 0
@@ -1312,6 +1316,7 @@ def render() -> None:
                 daily_logs=daily_logs,
                 movements=[m for m in movements if m.get("id") != selected_id],
                 adjustments=adjustments,
+                grading_logs=grading_logs,
             )
 
             edit_current_fish    = edit_src_state.get("fish_count", 0)   if edit_src_state else 0

@@ -583,6 +583,73 @@ def eso_biomass_mode(biomass_kg: float, avg_weight_g: float):
 
 # ── ESO input-mode tests ─────────────────────────────────────────────────────
 
+class TestGradingWeightInMovements:
+    """
+    Regression: compute_tank_state must use the histogram-calibrated avg weight
+    when grading_logs are passed — matching the value Movements now forwards.
+    """
+
+    def _make_tank(self, fish: int, avg_w: float) -> dict:
+        return {
+            "id": "tank_regr",
+            "name": "Tank-Regr",
+            "system_name": "M01",
+            "fish_count": fish,
+            "avg_weight_g": avg_w,
+            "tank_volume_m3": 50.0,
+        }
+
+    def _make_grading(self, date: str, avg_w: float) -> dict:
+        return {
+            "tank_id": "tank_regr",
+            "tank_name": "Tank-Regr",
+            "system_name": "M01",
+            "date": date,
+            "avg_weight_g": avg_w,
+            "sample_count": 30,
+        }
+
+    def test_without_grading_uses_farm_setup_avg(self):
+        tank = self._make_tank(fish=26544, avg_w=34.4)
+        from core.stock_engine import compute_tank_state
+        state = compute_tank_state(
+            tank=tank, batches=[], daily_logs=[], movements=[], adjustments=[],
+            # grading_logs not passed
+        )
+        assert state["avg_weight_g"] == 34.4
+
+    def test_with_grading_uses_histogram_avg(self):
+        tank = self._make_tank(fish=26544, avg_w=34.4)
+        grading = self._make_grading("2026-06-01", avg_w=52.2)
+        from core.stock_engine import compute_tank_state
+        state = compute_tank_state(
+            tank=tank, batches=[], daily_logs=[], movements=[], adjustments=[],
+            grading_logs=[grading],
+        )
+        assert state["avg_weight_g"] == 52.2
+
+    def test_biomass_derived_from_histogram_avg(self):
+        tank = self._make_tank(fish=26544, avg_w=34.4)
+        grading = self._make_grading("2026-06-01", avg_w=52.2)
+        from core.stock_engine import compute_tank_state
+        state = compute_tank_state(
+            tank=tank, batches=[], daily_logs=[], movements=[], adjustments=[],
+            grading_logs=[grading],
+        )
+        expected_biomass = round(26544 * 52.2 / 1000, 2)
+        assert abs(state["biomass_kg"] - expected_biomass) < 0.1
+
+    def test_fish_count_unchanged_by_grading(self):
+        tank = self._make_tank(fish=26544, avg_w=34.4)
+        grading = self._make_grading("2026-06-01", avg_w=52.2)
+        from core.stock_engine import compute_tank_state
+        state = compute_tank_state(
+            tank=tank, batches=[], daily_logs=[], movements=[], adjustments=[],
+            grading_logs=[grading],
+        )
+        assert state["fish_count"] == 26544
+
+
 class TestESOInputModes:
     """Tests for the fish-count / biomass calculation modes added to External Stock Out."""
 
